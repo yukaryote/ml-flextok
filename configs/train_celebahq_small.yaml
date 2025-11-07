@@ -1,0 +1,85 @@
+# FlexTok Fine-tuning Configuration for CelebA-HQ (Small/Debug)
+#
+# Smaller configuration for quick experimentation, debugging, or limited hardware.
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+
+model_name: "mit-han-lab/flextok-dfn-depth-12"
+
+train_encoder: true
+train_decoder: true
+train_vae: false
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+
+data_path: "./data/celeba_hq"
+img_size: 256
+use_augmentation: true
+
+# ============================================================================
+# Training Configuration (Reduced for quick experiments)
+# ============================================================================
+
+num_epochs: 10
+batch_size: 16  # Smaller batch size for limited GPU memory
+val_batch_size: 32
+num_workers: 2
+gradient_accumulation_steps: 2  # Effective batch size = 16 * 2 = 32
+use_amp: true
+max_grad_norm: 1.0
+
+# ============================================================================
+# Optimizer Configuration
+# ============================================================================
+
+optimizer: "adamw"
+learning_rate: 5.0e-5  # Slightly lower LR for smaller batches
+encoder_lr: 5.0e-5
+decoder_lr: 5.0e-5
+betas: [0.9, 0.999]
+weight_decay: 0.01
+eps: 1.0e-8
+
+# ============================================================================
+# Learning Rate Scheduler
+# ============================================================================
+
+scheduler: "cosine"
+warmup_steps: 200
+min_lr: 1.0e-6
+
+# ============================================================================
+# EMA
+# ============================================================================
+
+use_ema: false
+
+# ============================================================================
+# Inference Configuration
+# ============================================================================
+
+inference_steps: 20
+guidance_scale: 7.5
+perform_norm_guidance: true
+vis_token_counts: [1, 16, 256]  # Reduced for memory
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+
+checkpoint_dir: "./checkpoints/celebahq_ft_small"
+save_every: 2
+
+# ============================================================================
+# Logging & Visualization
+# ============================================================================
+
+use_wandb: true
+wandb_project: "flextok-finetuning"
+wandb_run_name: "celebahq-ft-256-small"
+log_every: 5
+visualize_every: 50

@@ -10,3 +10,4 @@ wandb/
 *.DS_Store
 *pkl
 *.egg-info
+data/*

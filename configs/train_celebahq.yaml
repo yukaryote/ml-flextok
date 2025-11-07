@@ -1,0 +1,135 @@
+# FlexTok Fine-tuning Configuration for CelebA-HQ
+#
+# This configuration file defines hyperparameters for fine-tuning FlexTok
+# on the CelebA-HQ dataset.
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+
+# Pre-trained model to load from Hugging Face
+model_name: "EPFL-VILAB/flextok_d18_d28_dfn"
+
+# Which components to train
+train_encoder: true
+train_decoder: true
+train_vae: false  # Keep VAE frozen (recommended)
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+
+# Path to CelebA-HQ dataset
+# Expected structure: data_path/{00000.jpg, 00001.jpg, ...}
+# or data_path/images/{00000.jpg, 00001.jpg, ...}
+data_path: "./data/celeba_hq"
+
+# Image size (256, 512, or 1024 depending on your dataset)
+img_size: 256
+
+# Data augmentation
+use_augmentation: true  # Enables RandomHorizontalFlip
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+
+# Number of training epochs
+num_epochs: 50
+
+# Batch sizes
+batch_size: 128
+val_batch_size: 64
+
+# Number of data loading workers
+num_workers: 4
+
+# Gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)
+gradient_accumulation_steps: 1
+
+# Mixed precision training (speeds up training, reduces memory)
+use_amp: true
+
+# Gradient clipping (0 to disable)
+max_grad_norm: 0
+
+# ============================================================================
+# Optimizer Configuration
+# ============================================================================
+
+# Optimizer type: adamw or adam
+optimizer: "adamw"
+
+# Learning rates (can set different LRs for different components)
+learning_rate: 1.0e-4
+encoder_lr: 1.0e-4
+decoder_lr: 1.0e-4
+vae_lr: 1.0e-5  # Lower LR for VAE if training it
+
+# AdamW parameters
+betas: [0.9, 0.999]
+weight_decay: 0.01
+eps: 1.0e-8
+
+# ============================================================================
+# Learning Rate Scheduler
+# ============================================================================
+
+# Scheduler type: cosine, linear, or none
+scheduler: "cosine"
+
+# Warmup steps
+warmup_steps: 500
+
+# Minimum learning rate for cosine scheduler
+min_lr: 1.0e-6
+
+# ============================================================================
+# EMA (Exponential Moving Average)
+# ============================================================================
+
+# Use EMA for more stable inference
+use_ema: false
+ema_decay: 0.9999
+
+# ============================================================================
+# Inference Configuration
+# ============================================================================
+
+# Number of denoising steps for reconstruction during validation
+inference_steps: 20
+
+# Guidance scale for decoder (classifier-free guidance)
+guidance_scale: 7.5
+
+# Whether to perform Adaptive Projected Guidance (APG)
+perform_norm_guidance: true
+
+# Token counts to visualize in flexible-length reconstructions
+# Shows how the model progressively builds up the image with more tokens
+vis_token_counts: [1, 4, 16, 256]
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+
+# Directory to save checkpoints
+checkpoint_dir: "./checkpoints/celebahq_ft"
+
+# Save checkpoint every N epochs
+save_every: 1
+
+# ============================================================================
+# Logging & Visualization
+# ============================================================================
+
+# Wandb configuration
+use_wandb: true
+wandb_project: "flextok-finetuning"
+wandb_run_name: "celebahq-ft-256"  # Set to null for auto-generated name
+
+# Log metrics every N steps
+log_every: 10
+
+# Visualize reconstructions every N steps
+visualize_every: 100
