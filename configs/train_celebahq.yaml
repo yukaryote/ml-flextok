@@ -13,7 +13,7 @@ model_name: "EPFL-VILAB/flextok_d18_d28_dfn"
 # Which components to train
 train_encoder: true
 train_decoder: true
-train_vae: false  # Keep VAE frozen (recommended)
+train_vae: false
 
 # ============================================================================
 # Data Configuration
@@ -38,8 +38,12 @@ use_augmentation: true  # Enables RandomHorizontalFlip
 num_epochs: 50
 
 # Batch sizes
-batch_size: 128
+batch_size: 64
 val_batch_size: 64
+
+# Maximum validation batches (null for all batches, set to limit for memory)
+# Example: 50 means validate on only first 50 batches
+max_val_batches: null
 
 # Number of data loading workers
 num_workers: 4
@@ -89,8 +93,8 @@ min_lr: 1.0e-6
 # ============================================================================
 
 # Use EMA for more stable inference
-use_ema: false
-ema_decay: 0.9999
+use_ema: true
+ema_decay: 0.999
 
 # ============================================================================
 # Inference Configuration

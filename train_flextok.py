@@ -25,7 +25,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 # Import FlexTok components
-from flextok import FlexTokFromHub
+from flextok import FlexTokFromHub, model
 from flextok.utils.dataloader import create_celebahq_dataloader
 from flextok.utils.demo import denormalize, batch_to_pil
 
@@ -235,32 +235,44 @@ class FlexTokTrainer:
         Returns:
             Dictionary containing loss and metrics
         """
-        # FlexTok expects a list of [1, C, H, W] images
+        # split into list of single-image tensors
         images_list = batch.split(1)
 
-        # Prepare data dict
         data_dict = {self.model.vae.images_read_key: images_list}
 
         # Forward pass: encode -> add noise -> decode
         data_dict = self.model(data_dict)
 
         # Extract predictions and targets
+        # see huggingface safetensors for keys but I'm hardcoding for now
         # The decoder outputs reconstructed latents in 'vae_latents_reconst'
         # The target is the original clean latents in 'vae_latents'
         pred_latents_list = data_dict['vae_latents_reconst']
         clean_latents_list = data_dict['vae_latents']
+        noise = data_dict[self.model.flow_matching_noise_module.noise_write_key]
+        flow_matching_target = [noise[i] - clean_latents_list[i] for i in range(len(clean_latents_list))]
 
         # Compute MSE loss between predicted and clean latents
         losses = []
-        for pred, target in zip(pred_latents_list, clean_latents_list):
+        for pred, target in zip(pred_latents_list, flow_matching_target):
             losses.append(F.mse_loss(pred, target))
 
         loss = torch.stack(losses).mean()
 
-        # Additional metrics
+        # Additional metrics for debugging
+        with torch.no_grad():
+            pred_mean = torch.stack([p.mean() for p in pred_latents_list]).mean()
+            pred_std = torch.stack([p.std() for p in pred_latents_list]).mean()
+            target_mean = torch.stack([t.mean() for t in clean_latents_list]).mean()
+            target_std = torch.stack([t.std() for t in clean_latents_list]).mean()
+
         metrics = {
             'loss': loss,
             'loss_std': torch.stack(losses).std() if len(losses) > 1 else torch.tensor(0.0),
+            'pred_mean': pred_mean,
+            'pred_std': pred_std,
+            'target_mean': target_mean,
+            'target_std': target_std,
         }
 
         return metrics
@@ -324,6 +336,11 @@ class FlexTokTrainer:
                         'train/lr': current_lr,
                         'train/epoch': epoch,
                         'train/step': self.global_step,
+                        # Additional debugging metrics
+                        'debug/pred_mean': metrics['pred_mean'].item(),
+                        'debug/pred_std': metrics['pred_std'].item(),
+                        'debug/target_mean': metrics['target_mean'].item(),
+                        'debug/target_std': metrics['target_std'].item(),
                     }
 
                     if self.use_wandb:
@@ -354,9 +371,18 @@ class FlexTokTrainer:
         """Validate the model."""
         self.model.eval()
 
+        # Clear cache before validation
+        torch.cuda.empty_cache()
+
         val_losses = []
 
-        for batch in tqdm(self.val_loader, desc="Validating"):
+        # Optionally limit validation batches to save memory
+        max_val_batches = self.config.get('max_val_batches', None)
+
+        for batch_idx, batch in enumerate(tqdm(self.val_loader, desc="Validating")):
+            if max_val_batches and batch_idx >= max_val_batches:
+                break
+
             batch = batch.to(self.device)
 
             if self.use_amp and self.device.type == 'cuda':
@@ -367,6 +393,14 @@ class FlexTokTrainer:
 
             val_losses.append(metrics['loss'].item())
 
+            # Delete batch to free memory
+            del batch
+            del metrics
+
+            # Clear cache every few batches
+            if batch_idx % 10 == 0:
+                torch.cuda.empty_cache()
+
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0.0
 
         # Log validation metrics
@@ -375,6 +409,9 @@ class FlexTokTrainer:
                 'val/loss': avg_val_loss,
                 'val/epoch': epoch,
             }, step=self.global_step)
+
+        # Clear cache after validation
+        torch.cuda.empty_cache()
 
         return {
             'loss': avg_val_loss,
@@ -585,6 +622,11 @@ class FlexTokTrainer:
         print(f"Gradient accumulation steps: {self.grad_accum_steps}")
         print(f"Wandb logging: {self.use_wandb}\n")
 
+        # Validate before starting to test oom
+        val_metrics = self.validate(0)
+        print(f"Validation Loss: {val_metrics['loss']:.4f}")
+        torch.cuda.empty_cache()
+
         for epoch in range(start_epoch, num_epochs + 1):
             # Train
             train_metrics = self.train_epoch(epoch)
@@ -628,6 +670,16 @@ def main():
     parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging')
     parser.add_argument('--device', type=str, default=None, help='Device to use (cuda/cpu)')
 
+    # Wandb options
+    parser.add_argument('--wandb-project', type=str, default=None, help='Wandb project name')
+    parser.add_argument('--wandb-name', type=str, default=None, help='Wandb run name')
+    parser.add_argument('--wandb-tags', type=str, nargs='+', default=None, help='Wandb tags (space-separated)')
+
+    # Training options
+    parser.add_argument('--batch-size', type=int, default=None, help='Batch size')
+    parser.add_argument('--lr', type=float, default=None, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=None, help='Number of epochs')
+
     args = parser.parse_args()
 
     # Load config
@@ -636,6 +688,18 @@ def main():
     # Override config with CLI args
     if args.no_wandb:
         config['use_wandb'] = False
+    if args.wandb_project:
+        config['wandb_project'] = args.wandb_project
+    if args.wandb_name:
+        config['wandb_run_name'] = args.wandb_name
+    if args.wandb_tags:
+        config['wandb_tags'] = args.wandb_tags
+    if args.batch_size:
+        config['batch_size'] = args.batch_size
+    if args.lr:
+        config['learning_rate'] = args.lr
+    if args.epochs:
+        config['num_epochs'] = args.epochs
 
     # Set device
     if args.device:
@@ -648,6 +712,7 @@ def main():
         wandb.init(
             project=config.get('wandb_project', 'flextok-finetuning'),
             name=config.get('wandb_run_name', None),
+            tags=config.get('wandb_tags', None),
             config=config,
             resume='allow' if args.resume else False,
         )
