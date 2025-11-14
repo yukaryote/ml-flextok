@@ -8,6 +8,7 @@ wandb/
 .vscode/
 *.pth
 *.DS_Store
-*pkl
+*.pkl
 *.egg-info
 data/*
+checkpoints/*

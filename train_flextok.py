@@ -29,6 +29,9 @@ from flextok import FlexTokFromHub, model
 from flextok.utils.dataloader import create_celebahq_dataloader
 from flextok.utils.demo import denormalize, batch_to_pil
 
+import warnings
+warnings.filterwarnings("ignore") 
+
 # Optional wandb import
 try:
     import wandb
@@ -258,6 +261,7 @@ class FlexTokTrainer:
             losses.append(F.mse_loss(pred, target))
 
         loss = torch.stack(losses).mean()
+        loss_std = torch.stack(losses).std() if len(losses) > 1 else torch.tensor(0.0)
 
         # Additional metrics for debugging
         with torch.no_grad():
@@ -266,9 +270,17 @@ class FlexTokTrainer:
             target_mean = torch.stack([t.mean() for t in clean_latents_list]).mean()
             target_std = torch.stack([t.std() for t in clean_latents_list]).mean()
 
+        del data_dict
+        del pred_latents_list
+        del clean_latents_list
+        del noise
+        del flow_matching_target
+        del losses
+        torch.cuda.empty_cache()
+
         metrics = {
             'loss': loss,
-            'loss_std': torch.stack(losses).std() if len(losses) > 1 else torch.tensor(0.0),
+            'loss_std': loss_std,
             'pred_mean': pred_mean,
             'pred_std': pred_std,
             'target_mean': target_mean,
@@ -353,10 +365,11 @@ class FlexTokTrainer:
 
                 # Visualization
                 if self.global_step % self.vis_every == 0 and self.use_wandb:
-                    self.visualize_reconstructions(batch[:4])
-                    
+                    vis_batch = batch[:4].clone().detach()
+                    self.visualize_reconstructions(vis_batch)
+
+                epoch_losses.append(metrics['loss'].item())
                 self.global_step += 1
-            epoch_losses.append(metrics['loss'].item())
 
         epoch_time = time.time() - epoch_start
         avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -630,7 +643,7 @@ class FlexTokTrainer:
         for epoch in range(start_epoch, num_epochs + 1):
             # Train
             train_metrics = self.train_epoch(epoch)
-
+            torch.cuda.empty_cache()
             print(f"\nEpoch {epoch}/{num_epochs} - "
                   f"Train Loss: {train_metrics['loss']:.4f}, "
                   f"Time: {train_metrics['time']:.2f}s")
@@ -722,6 +735,71 @@ def main():
     model_name = config.get('model_name', 'EPFL-VILAB/flextok_d18_d28_dfn')
     model = FlexTokFromHub.from_pretrained(model_name)
     print(f"Loaded model: {model_name}")
+
+    # Disable gradient checkpointing if requested
+    if config.get('disable_gradient_checkpointing', False):
+        print("\nDisabling gradient checkpointing...")
+
+        def unwrap_checkpoint_blocks(transformer_module):
+            """Unwrap checkpoint-wrapped blocks in a transformer."""
+            if not hasattr(transformer_module, 'blocks'):
+                return False
+
+            unwrapped_blocks = []
+            for block in transformer_module.blocks:
+                # Check if block is wrapped with checkpoint
+                if hasattr(block, '_checkpoint_wrapped_module'):
+                    # Unwrap the checkpoint wrapper
+                    unwrapped_blocks.append(block._checkpoint_wrapped_module)
+                else:
+                    unwrapped_blocks.append(block)
+
+            # Replace the wrapped blocks with unwrapped ones
+            import torch.nn as nn
+            transformer_module.blocks = nn.ModuleList(unwrapped_blocks)
+            transformer_module.use_act_checkpoint = False
+            return True
+
+        # Encoder transformer
+        if hasattr(model.encoder, 'module_dict') and 'enc_transformer' in model.encoder.module_dict:
+            enc_transformer = model.encoder.module_dict['enc_transformer']
+            if unwrap_checkpoint_blocks(enc_transformer):
+                print("  Unwrapped checkpointed blocks in encoder transformer")
+
+        # Decoder transformer
+        if hasattr(model.decoder, 'module_dict') and 'dec_transformer' in model.decoder.module_dict:
+            dec_transformer = model.decoder.module_dict['dec_transformer']
+            if unwrap_checkpoint_blocks(dec_transformer):
+                print("  Unwrapped checkpointed blocks in decoder transformer")
+
+    # Optionally modify FSQ levels (e.g., to use binary quantization)
+    if config.get('fsq_levels', None) is not None:
+        from flextok.regularizers.quantize_fsq import FSQ
+        new_levels = config['fsq_levels']
+        print(f"\nModifying FSQ levels from {model.regularizer._levels.tolist()} to {new_levels}")
+
+        # Get the original FSQ configuration
+        old_fsq = model.regularizer
+
+        # Create new FSQ with modified levels
+        new_fsq = FSQ(
+            latents_read_key=old_fsq.latents_read_key,
+            quants_write_key=old_fsq.quants_write_key,
+            tokens_write_key=old_fsq.tokens_write_key,
+            levels=new_levels,
+            drop_quant_p=old_fsq.drop_quant_p,
+            corrupt_tokens_p=old_fsq.corrupt_tokens_p,
+            min_corrupt_tokens_p=old_fsq.min_corrupt_tokens_p,
+            apply_corrupt_tokens_p=old_fsq.apply_corrupt_tokens_p,
+            packed_call=old_fsq.packed_call,
+        )
+
+        # Replace the FSQ module
+        model.regularizer = new_fsq
+
+        print(f"New FSQ configuration: {new_fsq}")
+        print(f"  Codebook size: {new_fsq.codebook_size} (was {old_fsq.codebook_size})")
+        print(f"  Dimensions: {new_fsq.dim} (was {old_fsq.dim})")
 
     # Create dataloaders
     print("\nCreating dataloaders...")

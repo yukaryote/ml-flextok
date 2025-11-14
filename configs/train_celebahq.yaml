@@ -8,12 +8,18 @@
 # ============================================================================
 
 # Pre-trained model to load from Hugging Face
-model_name: "EPFL-VILAB/flextok_d18_d28_dfn"
+model_name: "EPFL-VILAB/flextok_d18_d18_in1k"
 
 # Which components to train
 train_encoder: true
 train_decoder: true
 train_vae: false
+
+# Binary quantization for 20 questions
+fsq_levels: null  #[2, 2, 2, 2, 2, 2]
+
+# Disable gradient checkpointing for fine-tuning
+disable_gradient_checkpointing: false
 
 # ============================================================================
 # Data Configuration
@@ -38,7 +44,7 @@ use_augmentation: true  # Enables RandomHorizontalFlip
 num_epochs: 50
 
 # Batch sizes
-batch_size: 64
+batch_size: 16
 val_batch_size: 64
 
 # Maximum validation batches (null for all batches, set to limit for memory)
@@ -49,13 +55,14 @@ max_val_batches: null
 num_workers: 4
 
 # Gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)
+# With batch_size=16 and gradient_accumulation_steps=4, effective batch size = 64
 gradient_accumulation_steps: 1
 
 # Mixed precision training (speeds up training, reduces memory)
 use_amp: true
 
-# Gradient clipping (0 to disable)
-max_grad_norm: 0
+# Gradient clipping (1.0 is recommended for stable training)
+max_grad_norm: 1.0
 
 # ============================================================================
 # Optimizer Configuration
@@ -65,10 +72,10 @@ max_grad_norm: 0
 optimizer: "adamw"
 
 # Learning rates (can set different LRs for different components)
-learning_rate: 1.0e-4
-encoder_lr: 1.0e-4
-decoder_lr: 1.0e-4
-vae_lr: 1.0e-5  # Lower LR for VAE if training it
+learning_rate: 1.0e-6
+encoder_lr: 1.0e-6
+decoder_lr: 1.0e-6
+vae_lr: 1.0e-6  # Lower LR for VAE if training it
 
 # AdamW parameters
 betas: [0.9, 0.999]
@@ -83,7 +90,7 @@ eps: 1.0e-8
 scheduler: "cosine"
 
 # Warmup steps
-warmup_steps: 500
+warmup_steps: 200
 
 # Minimum learning rate for cosine scheduler
 min_lr: 1.0e-6
@@ -93,7 +100,7 @@ min_lr: 1.0e-6
 # ============================================================================
 
 # Use EMA for more stable inference
-use_ema: true
+use_ema: false
 ema_decay: 0.999
 
 # ============================================================================

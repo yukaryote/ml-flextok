@@ -1,0 +1,50 @@
+# Wandb Sweep Configuration for FlexTok Fine-tuning
+# This configuration will search for optimal learning rates and warmup steps
+
+program: train_flextok.py
+method: bayes  # Bayesian optimization for efficient search
+metric:
+  name: val/loss
+  goal: minimize
+
+parameters:
+  # Fixed parameters
+  config:
+    value: configs/train_celebahq.yaml
+
+  # Learning rate sweep (log scale)
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-4
+
+  encoder_lr:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-4
+
+  decoder_lr:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-4
+
+  # Warmup steps sweep
+  warmup_steps:
+    distribution: int_uniform
+    min: 100
+    max: 1000
+
+  # Optional: try different gradient clipping values
+  max_grad_norm:
+    values: [0.5, 1.0, 2.0]
+
+  # Optional: try with/without weight decay
+  weight_decay:
+    values: [0.0, 0.01, 0.05]
+
+# Early termination for poorly performing runs
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 2
+  s: 2
