@@ -44,7 +44,7 @@ use_augmentation: true  # Enables RandomHorizontalFlip
 num_epochs: 50
 
 # Batch sizes
-batch_size: 16
+batch_size: 32
 val_batch_size: 64
 
 # Maximum validation batches (null for all batches, set to limit for memory)
@@ -143,4 +143,4 @@ wandb_run_name: "celebahq-ft-256"  # Set to null for auto-generated name
 log_every: 10
 
 # Visualize reconstructions every N steps
-visualize_every: 100
+visualize_every: 1000
