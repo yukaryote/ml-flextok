@@ -12,3 +12,4 @@ wandb/
 *.egg-info
 data/*
 checkpoints/*
+outputs/*

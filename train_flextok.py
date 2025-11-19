@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import math
 import time
+from omegaconf import DictConfig, OmegaConf
+import hydra
 
 import torch
 import torch.nn as nn
@@ -28,6 +30,9 @@ from tqdm import tqdm
 from flextok import FlexTokFromHub, model
 from flextok.utils.dataloader import create_celebahq_dataloader
 from flextok.utils.demo import denormalize, batch_to_pil
+from flextok.regularizers.quantize_fsq import FSQ
+from flextok.model.postprocessors.heads import LinearHead
+from flextok.model.preprocessors.linear import LinearLayer
 
 import warnings
 warnings.filterwarnings("ignore") 
@@ -55,10 +60,10 @@ class FlexTokTrainer:
 
     def __init__(
         self,
+        config: DictConfig,
         model: FlexTokFromHub,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        config: Dict[str, Any],
         device: torch.device,
     ):
         self.model = model.to(device)
@@ -88,8 +93,8 @@ class FlexTokTrainer:
         # Setup learning rate scheduler (needs grad_accum_steps to be defined)
         self.scheduler = self._create_scheduler()
 
-        # Checkpointing
-        self.checkpoint_dir = Path(config.get('checkpoint_dir', './checkpoints'))
+        # Checkpointing (set to today's date by default)
+        self.checkpoint_dir = Path(f'./checkpoints/{config.get("wandb_run_name", "default")}/{time.strftime("%Y%m%d")}')
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.save_every = config.get('save_every', 1)
 
@@ -582,18 +587,27 @@ class FlexTokTrainer:
         # Save latest checkpoint
         checkpoint_path = self.checkpoint_dir / 'checkpoint_latest.pt'
         torch.save(checkpoint, checkpoint_path)
+        artifact = wandb.Artifact('latest', type='model')
+        artifact.add_file("checkpoint_latest.pt")
+        wandb.log_artifact(artifact)
         print(f"Saved checkpoint to {checkpoint_path}")
 
         # Save epoch checkpoint
         if epoch % self.save_every == 0:
             epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pt'
             torch.save(checkpoint, epoch_path)
+            artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
+            artifact.add_file(f'checkpoint_epoch_{epoch:04d}.pt')
+            wandb.log_artifact(artifact)
             print(f"Saved epoch checkpoint to {epoch_path}")
 
         # Save best checkpoint
         if is_best:
             best_path = self.checkpoint_dir / 'checkpoint_best.pt'
             torch.save(checkpoint, best_path)
+            artifact = wandb.Artifact('latest', type='model')
+            artifact.add_file("checkpoint_best.pt")
+            wandb.log_artifact(artifact)
             print(f"Saved best checkpoint to {best_path}")
 
             if self.use_wandb:
@@ -676,58 +690,22 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Fine-tune FlexTok on custom datasets")
-    parser.add_argument('--config', type=str, required=True, help='Path to config YAML file')
-    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
-    parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging')
-    parser.add_argument('--device', type=str, default=None, help='Device to use (cuda/cpu)')
-
-    # Wandb options
-    parser.add_argument('--wandb-project', type=str, default=None, help='Wandb project name')
-    parser.add_argument('--wandb-name', type=str, default=None, help='Wandb run name')
-    parser.add_argument('--wandb-tags', type=str, nargs='+', default=None, help='Wandb tags (space-separated)')
-
-    # Training options
-    parser.add_argument('--batch-size', type=int, default=None, help='Batch size')
-    parser.add_argument('--lr', type=float, default=None, help='Learning rate')
-    parser.add_argument('--epochs', type=int, default=None, help='Number of epochs')
-
-    args = parser.parse_args()
-
+@hydra.main(version_base=None, config_path="configs/", config_name="train_celebahq")
+def main(cfg: DictConfig):
     # Load config
-    config = load_config(args.config)
-
-    # Override config with CLI args
-    if args.no_wandb:
-        config['use_wandb'] = False
-    if args.wandb_project:
-        config['wandb_project'] = args.wandb_project
-    if args.wandb_name:
-        config['wandb_run_name'] = args.wandb_name
-    if args.wandb_tags:
-        config['wandb_tags'] = args.wandb_tags
-    if args.batch_size:
-        config['batch_size'] = args.batch_size
-    if args.lr:
-        config['learning_rate'] = args.lr
-    if args.epochs:
-        config['num_epochs'] = args.epochs
+    config = cfg
 
     # Set device
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Initialize wandb
     if config.get('use_wandb', True) and WANDB_AVAILABLE:
         wandb.init(
-            project=config.get('wandb_project', 'flextok-finetuning'),
-            name=config.get('wandb_run_name', None),
-            tags=config.get('wandb_tags', None),
-            config=config,
-            resume='allow' if args.resume else False,
+            project=config.wandb_project,
+            name=config.wandb_run_name,
+            tags=config.wandb_tags,
+            config=OmegaConf.to_container(config, resolve=True),
+            resume='allow' if config.resume else False,
         )
 
     # Load model
@@ -779,7 +757,32 @@ def main():
         print(f"\nModifying FSQ levels from {model.regularizer._levels.tolist()} to {new_levels}")
 
         # Get the original FSQ configuration
-        old_fsq = model.regularizer
+        old_fsq: FSQ = model.regularizer
+
+        # Check if the encoder output dimension matches the fsq levels length
+        old_fsq_output_dim = old_fsq.dim
+        if old_fsq_output_dim != len(new_levels):
+            # project encoder dim to new fsq dim
+            print(f"Adjusting encoder output dimension from {old_fsq_output_dim} to {len(new_levels)}")
+            new_enc_linear_head = LinearHead(
+                read_key=model.encoder.module_dict["enc_to_latents"].read_key,
+                write_key=model.encoder.module_dict["enc_to_latents"].write_key,
+                dim=model.encoder.module_dict["enc_to_latents"].dim_in,
+                dim_out=len(new_levels),
+                use_mup_readout=False,
+            )
+
+            model.encoder.module_dict['enc_to_latents'] = new_enc_linear_head
+
+            # project back from fsq to decoder input dim
+            print(f"Adjusting decoder input dimension to {len(new_levels)}")
+            new_dec_linear_head = LinearLayer(
+                read_key=model.decoder.module_dict["dec_from_latents"].read_key,
+                write_key=model.decoder.module_dict["dec_from_latents"].write_key,
+                dim_in=len(new_levels),
+                dim=model.decoder.module_dict["dec_from_latents"].dim_out,
+            )
+            model.decoder.module_dict['dec_from_latents'] = new_dec_linear_head
 
         # Create new FSQ with modified levels
         new_fsq = FSQ(
@@ -832,16 +835,16 @@ def main():
 
     # Create trainer
     trainer = FlexTokTrainer(
+        config=config,
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        config=config,
         device=device,
     )
 
     # Resume from checkpoint if provided
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    if config.resume:
+        trainer.load_checkpoint(config.resume)
 
     # Train
     trainer.train()
