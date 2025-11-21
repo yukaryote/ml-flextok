@@ -15,8 +15,8 @@ train_encoder: true
 train_decoder: true
 train_vae: false
 
-# Binary quantization for 20 questions
-fsq_levels: [2, 2, 2, 2, 2, 2]
+# Binary quantization levels for FlexTok (null to use all levels)
+fsq_levels: null
 
 # Disable gradient checkpointing for fine-tuning
 disable_gradient_checkpointing: false
@@ -146,3 +146,27 @@ log_every: 10
 
 # Visualize reconstructions every N steps
 visualize_every: 1000
+
+# ============================================================================
+# REPA Loss Configuration
+# ============================================================================
+
+# Enable REPA auxiliary loss for better semantic representations
+use_repa: false
+
+# Weight for REPA loss (paper recommends 1.0 for equal weighting)
+repa_weight: 1.0
+
+# Pretrained encoder for REPA
+# Options: 'dinov2_vitl14', 'dinov2_vitg14', 'dinov2_vitb14'
+repa_encoder_type: 'dinov2_vitl14'
+
+# Encoder output dimension
+# DINOv2-L: 1024, DINOv2-G: 1536, DINOv2-B: 768
+repa_encoder_dim: 1024
+
+# Target spatial size for feature matching (paper uses 37x37)
+repa_target_size: [37, 37]
+
+# Separate learning rate for REPA projector (optional)
+repa_lr: 1.0e-4

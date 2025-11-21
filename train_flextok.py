@@ -109,6 +109,35 @@ class FlexTokTrainer:
             self.ema_model = self._create_ema_model()
             self.ema_decay = config.get('ema_decay', 0.9999)
 
+        # REPA Loss (optional)
+        self.use_repa = config.get('use_repa', False)
+        self.repa_weight = config.get('repa_weight', 1.0)
+        if self.use_repa:
+            from flextok.model.utils.repa_loss import REPAModule
+            from flextok.model.trunks.transformers import FlexTransformer
+
+            # Get decoder dimension from model
+            transformer: FlexTransformer = self.model.decoder.module_dict['dec_transformer']
+            decoder_dim = transformer.blocks[0].dim if transformer is not None else None
+
+            # Initialize REPA module with frozen encoder
+            self.repa_module = REPAModule(
+                features_read_key=transformer.intermediate_layer_write_key,  # Key to read decoder features
+                images_read_key=self.model.vae.images_read_key,  # Key to read target images
+                write_key='repa_projected_features',       # Key to write projected features
+                decoder_dim=decoder_dim,
+                encoder_type=config.get('repa_encoder_type', 'dinov2_vitl14'),
+                encoder_dim=config.get('repa_encoder_dim', 1024),
+                target_size=tuple(config.get('repa_target_size', [37, 37])),
+            ).to(device)
+
+            print(f"\nInitialized REPA module:")
+            print(f"  Encoder: {config.get('repa_encoder_type', 'dinov2_vitl14')}")
+            print(f"  Decoder dim: {decoder_dim}")
+            print(f"  Encoder dim: {config.get('repa_encoder_dim', 1024)}")
+            print(f"  Target size: {config.get('repa_target_size', [37, 37])}")
+            print(f"  REPA weight: {self.repa_weight}")
+
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer for training."""
         config = self.config
@@ -149,6 +178,14 @@ class FlexTokTrainer:
         # Regularizer is typically kept frozen
         for param in self.model.regularizer.parameters():
             param.requires_grad = False
+
+        # REPA projector parameters (optional)
+        if hasattr(self, 'repa_module') and self.use_repa:
+            param_groups.append({
+                'params': self.repa_module.projector.parameters(),
+                'lr': config.get('repa_lr', config.get('learning_rate', 1e-4)),
+                'name': 'repa_projector'
+            })
 
         # Create optimizer
         optimizer_type = config.get('optimizer', 'adamw').lower()
@@ -235,7 +272,7 @@ class FlexTokTrainer:
 
     def compute_loss(self, batch: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Compute flow matching loss for a batch of images.
+        Compute flow matching loss + REPA loss for a batch of images.
 
         Args:
             batch: Batch of images, shape (B, 3, H, W), normalized to [-1, 1]
@@ -260,13 +297,19 @@ class FlexTokTrainer:
         noise = data_dict[self.model.flow_matching_noise_module.noise_write_key]
         flow_matching_target = [noise[i] - clean_latents_list[i] for i in range(len(clean_latents_list))]
 
-        # Compute MSE loss between predicted and clean latents
+        # Compute MSE loss between predicted and clean latents (Flow Matching loss)
         losses = []
         for pred, target in zip(pred_latents_list, flow_matching_target):
             losses.append(F.mse_loss(pred, target))
 
-        loss = torch.stack(losses).mean()
+        flow_loss = torch.stack(losses).mean()
         loss_std = torch.stack(losses).std() if len(losses) > 1 else torch.tensor(0.0)
+
+        # Compute REPA loss
+        repa_loss = self.compute_repa_loss(data_dict, batch)
+
+        # Combined loss
+        loss = flow_loss + self.repa_weight * repa_loss
 
         # Additional metrics for debugging
         with torch.no_grad():
@@ -285,6 +328,8 @@ class FlexTokTrainer:
 
         metrics = {
             'loss': loss,
+            'flow_loss': flow_loss,
+            'repa_loss': repa_loss,
             'loss_std': loss_std,
             'pred_mean': pred_mean,
             'pred_std': pred_std,
@@ -293,6 +338,51 @@ class FlexTokTrainer:
         }
 
         return metrics
+
+    def compute_repa_loss(self, data_dict: Dict[str, torch.Tensor], original_images: torch.Tensor) -> torch.Tensor:
+        """
+        Compute REPA loss for a batch of images.
+
+        Args:
+            data_dict: Dictionary containing data after forward pass
+            original_images: Original input images (B, 3, H, W)
+        Returns:
+            REPA loss scalar
+        """
+        if not hasattr(self, 'repa_module') or not self.use_repa:
+            return torch.tensor(0.0, device=original_images.device)
+
+        # Extract intermediate layer features from decoder layer 1
+        intermediate_features = data_dict.get('dec_packed_seq_repa_layer')
+
+        if intermediate_features is None:
+            return torch.tensor(0.0, device=original_images.device)
+
+        # Unpack the features to spatial format using the dec_repa_unpacker
+        # The unpacker needs the packing shapes from the seq_packer
+        unpacker = self.model.decoder.module_dict['dec_repa_unpacker']
+
+        unpack_dict = {
+            unpacker.packed_seq_read_key: intermediate_features,
+            unpacker.inner_packed_shapes_read_key: data_dict['dec_ps_inner'],
+            unpacker.outer_packed_shapes_read_key: data_dict['dec_ps_outer'],
+        }
+        unpack_dict = unpacker(unpack_dict)
+
+        # Get the unpacked patches (first element of inner_seq_write_keys is 'dec_patches_repa_layer')
+        # This contains the spatial patch features, not the register tokens
+        decoder_features = unpack_dict[unpacker.inner_seq_write_keys[0]]
+
+        # Prepare data_dict for REPA module
+        repa_data_dict = {
+            self.repa_module.features_read_key: decoder_features,
+            self.repa_module.images_read_key: original_images,
+        }
+
+        # Compute REPA loss
+        repa_loss = self.repa_module(repa_data_dict)
+
+        return repa_loss
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Train for one epoch."""
@@ -349,6 +439,8 @@ class FlexTokTrainer:
 
                     log_dict = {
                         'train/loss': metrics['loss'].item(),
+                        'train/flow_loss': metrics['flow_loss'].item(),
+                        'train/repa_loss': metrics['repa_loss'].item() if isinstance(metrics['repa_loss'], torch.Tensor) else metrics['repa_loss'],
                         'train/loss_std': metrics['loss_std'].item(),
                         'train/lr': current_lr,
                         'train/epoch': epoch,
@@ -363,10 +455,16 @@ class FlexTokTrainer:
                     if self.use_wandb:
                         wandb.log(log_dict, step=self.global_step)
 
-                    pbar.set_postfix({
+                    # Update progress bar with both flow and REPA loss if available
+                    postfix_dict = {
                         'loss': f"{metrics['loss'].item():.4f}",
+                        'flow': f"{metrics['flow_loss'].item():.4f}",
                         'lr': f"{current_lr:.2e}",
-                    })
+                    }
+                    if self.use_repa and isinstance(metrics['repa_loss'], torch.Tensor):
+                        postfix_dict['repa'] = f"{metrics['repa_loss'].item():.4f}"
+
+                    pbar.set_postfix(postfix_dict)
 
                 # Visualization
                 if self.global_step % self.vis_every == 0 and self.use_wandb:
@@ -584,30 +682,33 @@ class FlexTokTrainer:
         if self.use_ema:
             checkpoint['ema_model_state_dict'] = self.ema_model.state_dict()
 
+        if self.use_repa and hasattr(self, 'repa_module'):
+            checkpoint['repa_module_state_dict'] = self.repa_module.state_dict()
+
         # Save latest checkpoint
         checkpoint_path = self.checkpoint_dir / 'checkpoint_latest.pt'
         torch.save(checkpoint, checkpoint_path)
-        artifact = wandb.Artifact('latest', type='model')
-        artifact.add_file("checkpoint_latest.pt")
-        wandb.log_artifact(artifact)
+        # artifact = wandb.Artifact('latest', type='model')
+        # artifact.add_file(checkpoint_path)
+        # wandb.log_artifact(artifact)
         print(f"Saved checkpoint to {checkpoint_path}")
 
         # Save epoch checkpoint
         if epoch % self.save_every == 0:
             epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pt'
             torch.save(checkpoint, epoch_path)
-            artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
-            artifact.add_file(f'checkpoint_epoch_{epoch:04d}.pt')
-            wandb.log_artifact(artifact)
+            # artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
+            # artifact.add_file(epoch_path)
+            # wandb.log_artifact(artifact)
             print(f"Saved epoch checkpoint to {epoch_path}")
 
         # Save best checkpoint
         if is_best:
             best_path = self.checkpoint_dir / 'checkpoint_best.pt'
             torch.save(checkpoint, best_path)
-            artifact = wandb.Artifact('latest', type='model')
-            artifact.add_file("checkpoint_best.pt")
-            wandb.log_artifact(artifact)
+            # artifact = wandb.Artifact('latest', type='model')
+            # artifact.add_file(best_path)
+            # wandb.log_artifact(artifact)
             print(f"Saved best checkpoint to {best_path}")
 
             if self.use_wandb:
@@ -630,6 +731,10 @@ class FlexTokTrainer:
         if self.use_ema and checkpoint.get('ema_model_state_dict'):
             self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
 
+        if self.use_repa and hasattr(self, 'repa_module') and checkpoint.get('repa_module_state_dict'):
+            self.repa_module.load_state_dict(checkpoint['repa_module_state_dict'])
+            print("Loaded REPA module state from checkpoint")
+
         self.current_epoch = checkpoint['epoch']
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
@@ -648,7 +753,7 @@ class FlexTokTrainer:
         print(f"Mixed precision: {self.use_amp}")
         print(f"Gradient accumulation steps: {self.grad_accum_steps}")
         print(f"Wandb logging: {self.use_wandb}\n")
-
+        
         # Validate before starting to test oom
         val_metrics = self.validate(0)
         print(f"Validation Loss: {val_metrics['loss']:.4f}")
@@ -697,16 +802,6 @@ def main(cfg: DictConfig):
 
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Initialize wandb
-    if config.get('use_wandb', True) and WANDB_AVAILABLE:
-        wandb.init(
-            project=config.wandb_project,
-            name=config.wandb_run_name,
-            tags=config.wandb_tags,
-            config=OmegaConf.to_container(config, resolve=True),
-            resume='allow' if config.resume else False,
-        )
 
     # Load model
     print("Loading FlexTok model...")
@@ -845,6 +940,16 @@ def main(cfg: DictConfig):
     # Resume from checkpoint if provided
     if config.resume:
         trainer.load_checkpoint(config.resume)
+
+    # Initialize wandb
+    if config.get('use_wandb', True) and WANDB_AVAILABLE:
+        wandb.init(
+            project=config.wandb_project,
+            name=config.wandb_run_name,
+            tags=config.wandb_tags,
+            config=OmegaConf.to_container(config, resolve=True),
+            resume='allow' if config.resume else False,
+        )
 
     # Train
     trainer.train()

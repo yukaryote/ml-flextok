@@ -6,7 +6,9 @@ Run with: streamlit run visualize_clusters.py
 
 import streamlit as st
 import torch
+import sys
 import os
+import argparse
 from PIL import Image
 
 # Page configuration
@@ -51,8 +53,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # FSQ levels configuration
-FSQ_LEVELS = [8, 8, 8, 5, 5, 5]
-IMG_OUTPUT_DIR = "/home/iyu/flextok_first_token_samples/"
+def parse_args(args):
+    parser = argparse.ArgumentParser('Data Diagnostics')
+    parser.add_argument('-fsq', default=[8,8,8,5,5,5], help='CSV file', required=True)
+    parser.add_argument('--output_dir', default="/home/iyu/flextok_first_token_samples/", help='Output directory', required=False)
+    return parser.parse_args(args)
+
+args = parse_args(sys.argv[1:])
+FSQ_LEVELS = [int(x) for x in args.fsq]
+IMG_OUTPUT_DIR = args.output_dir
 
 def get_quant_values(level):
     """Get quantization values for a given FSQ level"""
