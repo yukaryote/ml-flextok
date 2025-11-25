@@ -1,9 +1,9 @@
 # For licensing see accompanying LICENSE file.
 # Copyright (C) 2025 Apple Inc. and EPFL. All Rights Reserved.
 """
-CelebA-HQ Dataset Loader for FlexTok Fine-tuning
+CelebA and CelebA-HQ Dataset Loaders for FlexTok Fine-tuning
 
-This module provides a PyTorch Dataset class for loading CelebA-HQ images
+This module provides PyTorch Dataset classes for loading CelebA and CelebA-HQ images
 with preprocessing suitable for FlexTok training.
 """
 
@@ -16,10 +16,285 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 
-__all__ = ["CelebAHQDataset", "create_celebahq_dataloader"]
+__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeba_dataloader", "create_celebahq_dataloader"]
 
 
-class CelebAHQDataset(Dataset):
+class _BaseCelebADataset(Dataset):
+    """
+    Base class for CelebA-family datasets with common preprocessing logic.
+
+    This base class provides shared functionality for CelebA and CelebA-HQ datasets,
+    including image normalization, transform application, and path handling.
+    """
+    SPLIT_INDICES = {
+        "train": (0, 27000),  # To be defined in subclasses
+        "val": (27000, 28500),  # To be defined in subclasses
+        "test": (28500, 30000),  # To be defined in subclasses
+        "all": (0, 30000),  # To be defined in subclasses
+    }  # To be defined in subclasses
+    def __init__(
+        self,
+        root_dir: str,
+        img_size: int,
+        split: str,
+        transform: Optional[Callable],
+        return_path: bool,
+        extensions: List[str] = None,
+    ):
+        self.root_dir = Path(root_dir)
+        self.img_size = img_size
+        self.split = split
+        self.custom_transform = transform
+        self.return_path = return_path
+
+        if extensions is None:
+            extensions = [".jpg", ".png", ".jpeg"]
+        self.extensions = extensions
+
+        # Validate split
+        if split not in self.SPLIT_INDICES:
+            raise ValueError(
+                f"Invalid split '{split}'. Must be one of {list(self.SPLIT_INDICES.keys())}"
+            )
+
+        # Find all image files
+        self.image_paths = self._find_images()
+
+        if len(self.image_paths) == 0:
+            raise ValueError(
+                f"No images found in {self.root_dir}. "
+                f"Please check the directory structure and file extensions."
+            )
+
+        # Apply split
+        start_idx, end_idx = self.SPLIT_INDICES[split]
+        self.image_paths = self.image_paths[start_idx:end_idx]
+
+        if len(self.image_paths) == 0:
+            warnings.warn(
+                f"No images found for split '{split}' in range [{start_idx}, {end_idx}). "
+                f"Total images found: {len(self.image_paths)}"
+            )
+
+        # Define preprocessing transforms using base class helper
+        # FlexTok expects images normalized to [-1, 1] using mean=0.5, std=0.5
+        self.base_transform = self._create_base_transform(
+            resize_first=True,  # Resize before crop for HQ images
+            center_crop_size=None  # Crop to img_size
+        )
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+    
+    def _find_images(self) -> List[Path]:
+        """
+        Find all image files in the root directory.
+
+        Searches in both root_dir and root_dir/images subdirectory.
+        Sorts files numerically by stem (filename without extension).
+        """
+        image_paths = []
+
+        # Search in root_dir
+        for ext in self.extensions:
+            image_paths.extend(self.root_dir.glob(f"*{ext}"))
+
+        # Also search in root_dir/images if it exists
+        images_subdir = self.root_dir / "images"
+        if images_subdir.exists():
+            for ext in self.extensions:
+                image_paths.extend(images_subdir.glob(f"*{ext}"))
+
+        # Sort by numeric stem (e.g., "00000.jpg" -> 0, "00001.jpg" -> 1)
+        def sort_key(path):
+            try:
+                return int(path.stem)
+            except ValueError:
+                return path.stem
+
+        image_paths = sorted(image_paths, key=sort_key)
+        return image_paths
+    
+    def _create_base_transform(
+        self,
+        resize_first: bool = True,
+        center_crop_size: Optional[int] = None
+    ) -> transforms.Compose:
+        """
+        Create base transform pipeline for image preprocessing.
+
+        Args:
+            resize_first: If True, resize before center crop. Otherwise crop first.
+            center_crop_size: Size for center crop. If None, crops to img_size.
+
+        Returns:
+            Composed transform pipeline that normalizes to [-1, 1].
+        """
+        crop_size = center_crop_size if center_crop_size is not None else self.img_size
+
+        if resize_first:
+            transform_list = [
+                transforms.Resize(self.img_size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(self.img_size),
+            ]
+        else:
+            transform_list = [
+                transforms.CenterCrop(crop_size),
+                transforms.Resize(self.img_size, interpolation=transforms.InterpolationMode.BILINEAR),
+            ]
+
+        # Add tensor conversion and normalization to [-1, 1]
+        transform_list.extend([
+            transforms.ToTensor(),  # Converts to [0, 1]
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # To [-1, 1]
+        ])
+
+        return transforms.Compose(transform_list)
+
+    def _apply_transforms(self, img: Image.Image) -> torch.Tensor:
+        """Apply base and custom transforms to an image."""
+        img = self.base_transform(img)
+        if self.custom_transform is not None:
+            img = self.custom_transform(img)
+        return img
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"root_dir={self.root_dir}, "
+            f"img_size={self.img_size}, "
+            f"split={self.split}, "
+            f"num_images={len(self)}"
+            f")"
+        )
+    
+    def __getitem__(self, idx: int) -> torch.Tensor | Tuple[torch.Tensor, str]:
+        """
+        Load and preprocess an image.
+
+        Args:
+            idx: Index of the image to load.
+
+        Returns:
+            Image tensor of shape (3, img_size, img_size) normalized to [-1, 1],
+            or (image, path) tuple if return_path=True.
+        """
+        img_path = self.image_paths[idx]
+
+        # Load image with retry logic for corrupted files
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                img = Image.open(img_path).convert("RGB")
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    # Last attempt failed - try loading a different image
+                    warnings.warn(
+                        f"Failed to load image {img_path} after {max_retries} attempts: {e}. "
+                        f"Skipping to next image."
+                    )
+                    # Return a random other image from the dataset
+                    new_idx = (idx + 1) % len(self.image_paths)
+                    if new_idx == idx:
+                        # Only one image in dataset, create a blank image
+                        img = Image.new('RGB', (self.img_size, self.img_size), color=(128, 128, 128))
+                    else:
+                        return self.__getitem__(new_idx)
+                else:
+                    # Retry after a short delay
+                    import time
+                    time.sleep(0.1)
+
+        # Apply transforms using base class helper
+        img = self._apply_transforms(img)
+
+        if self.return_path:
+            return img, str(img_path)
+        return img
+
+
+class CelebADataset(_BaseCelebADataset):
+    """
+    CelebA (Aligned and Cropped) Dataset for FlexTok fine-tuning.
+
+    This dataset uses torchvision's built-in CelebA dataset loader which handles
+    downloading the aligned and cropped CelebA images (178x218) and provides
+    preprocessing compatible with FlexTok's expected input format (normalized to [-1, 1]).
+
+    The dataset contains 202,599 face images of celebrities with 40 binary attributes
+    per image. This class focuses on the images for generative modeling.
+
+    Args:
+        root_dir (str): Root directory where the dataset will be downloaded/stored.
+            The images will be stored in root_dir/celeba/img_align_celeba/.
+        img_size (int): Target image size for resizing. Default: 256.
+            Original images are 178x218 and will be center cropped to square
+            then resized to img_size x img_size.
+        split (str): Dataset split. One of "train", "valid", "test", or "all".
+            Default: "train"
+            - train: 162,770 images
+            - valid: 19,867 images
+            - test: 19,962 images
+            - all: All 202,599 images
+        transform (Optional[Callable]): Additional transforms to apply after
+            default preprocessing. Default: None.
+        download (bool): If True, downloads the dataset from the internet.
+            Default: True. Requires 'gdown' package to be installed.
+        return_path (bool): If True, return (image, path) tuples instead of
+            just images. Useful for debugging. Default: False.
+
+    Returns:
+        torch.Tensor: Image tensor of shape (3, img_size, img_size) normalized
+            to [-1, 1] range, or (image, path) tuple if return_path=True.
+
+    Examples:
+        >>> # Basic usage with automatic download
+        >>> dataset = CelebADataset(root_dir="/path/to/data", download=True)
+        >>> img = dataset[0]  # Returns tensor of shape (3, 256, 256)
+
+        >>> # With validation split
+        >>> val_dataset = CelebADataset(
+        ...     root_dir="/path/to/data",
+        ...     img_size=128,
+        ...     split="valid",
+        ...     download=False  # Already downloaded
+        ... )
+
+        >>> # With custom transforms
+        >>> from torchvision import transforms
+        >>> custom_transform = transforms.RandomHorizontalFlip(p=0.5)
+        >>> dataset = CelebADataset(
+        ...     root_dir="/path/to/data",
+        ...     transform=custom_transform,
+        ...     download=True
+        ... )
+
+    Note:
+        The dataset download requires the 'gdown' package. Install it with:
+        pip install gdown
+    """
+    SPLIT_INDICES = {
+        "train": (0, 162769),
+        "val": (162770, 182636),
+        "test": (182637, 202598),
+        "all": (0, 202598),
+    }
+
+    def __init__(
+        self,
+        root_dir: str,
+        img_size: int = 256,
+        split: str = "train",
+        transform: Optional[Callable] = None,
+        return_path: bool = False,
+        extensions: List[str] = None,
+    ):
+        # Initialize base class
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
+
+
+class CelebAHQDataset(_BaseCelebADataset):
     """
     CelebA-HQ Dataset for FlexTok fine-tuning.
 
@@ -86,143 +361,12 @@ class CelebAHQDataset(Dataset):
         return_path: bool = False,
         extensions: List[str] = None,
     ):
-        self.root_dir = Path(root_dir)
-        self.img_size = img_size
-        self.split = split
-        self.custom_transform = transform
-        self.return_path = return_path
-
-        if extensions is None:
-            extensions = [".jpg", ".png", ".jpeg"]
-        self.extensions = extensions
-
-        # Validate split
-        if split not in self.SPLIT_INDICES:
-            raise ValueError(
-                f"Invalid split '{split}'. Must be one of {list(self.SPLIT_INDICES.keys())}"
-            )
-
-        # Find all image files
-        self.image_paths = self._find_images()
-
-        if len(self.image_paths) == 0:
-            raise ValueError(
-                f"No images found in {self.root_dir}. "
-                f"Please check the directory structure and file extensions."
-            )
-
-        # Apply split
-        start_idx, end_idx = self.SPLIT_INDICES[split]
-        self.image_paths = self.image_paths[start_idx:end_idx]
-
-        if len(self.image_paths) == 0:
-            warnings.warn(
-                f"No images found for split '{split}' in range [{start_idx}, {end_idx}). "
-                f"Total images found: {len(self.image_paths)}"
-            )
-
-        # Define preprocessing transforms
-        # FlexTok expects images normalized to [-1, 1] using mean=0.5, std=0.5
-        self.base_transform = transforms.Compose([
-            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor(),  # Converts to [0, 1]
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # To [-1, 1]
-        ])
-
-    def _find_images(self) -> List[Path]:
-        """
-        Find all image files in the root directory.
-
-        Searches in both root_dir and root_dir/images subdirectory.
-        Sorts files numerically by stem (filename without extension).
-        """
-        image_paths = []
-
-        # Search in root_dir
-        for ext in self.extensions:
-            image_paths.extend(self.root_dir.glob(f"*{ext}"))
-
-        # Also search in root_dir/images if it exists
-        images_subdir = self.root_dir / "images"
-        if images_subdir.exists():
-            for ext in self.extensions:
-                image_paths.extend(images_subdir.glob(f"*{ext}"))
-
-        # Sort by numeric stem (e.g., "00000.jpg" -> 0, "00001.jpg" -> 1)
-        def sort_key(path):
-            try:
-                return int(path.stem)
-            except ValueError:
-                return path.stem
-
-        image_paths = sorted(image_paths, key=sort_key)
-        return image_paths
-
-    def __len__(self) -> int:
-        return len(self.image_paths)
-
-    def __getitem__(self, idx: int) -> torch.Tensor | Tuple[torch.Tensor, str]:
-        """
-        Load and preprocess an image.
-
-        Args:
-            idx: Index of the image to load.
-
-        Returns:
-            Image tensor of shape (3, img_size, img_size) normalized to [-1, 1],
-            or (image, path) tuple if return_path=True.
-        """
-        img_path = self.image_paths[idx]
-
-        # Load image with retry logic for corrupted files
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                img = Image.open(img_path).convert("RGB")
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    # Last attempt failed - try loading a different image
-                    warnings.warn(
-                        f"Failed to load image {img_path} after {max_retries} attempts: {e}. "
-                        f"Skipping to next image."
-                    )
-                    # Return a random other image from the dataset
-                    new_idx = (idx + 1) % len(self.image_paths)
-                    if new_idx == idx:
-                        # Only one image in dataset, create a blank image
-                        img = Image.new('RGB', (self.img_size, self.img_size), color=(128, 128, 128))
-                    else:
-                        return self.__getitem__(new_idx)
-                else:
-                    # Retry after a short delay
-                    import time
-                    time.sleep(0.1)
-
-        # Apply base transforms (resize, crop, normalize)
-        img = self.base_transform(img)
-
-        # Apply custom transforms if provided
-        if self.custom_transform is not None:
-            img = self.custom_transform(img)
-
-        if self.return_path:
-            return img, str(img_path)
-        return img
-
-    def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}("
-            f"root_dir={self.root_dir}, "
-            f"img_size={self.img_size}, "
-            f"split={self.split}, "
-            f"num_images={len(self)}"
-            f")"
-        )
+        # Initialize base class
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
 
 
-def create_celebahq_dataloader(
+def create_celeb_dataloader(
+    dataset_type: str,
     root_dir: str,
     img_size: int = 256,
     batch_size: int = 32,
@@ -234,12 +378,13 @@ def create_celebahq_dataloader(
     **kwargs
 ) -> DataLoader:
     """
-    Create a DataLoader for CelebA-HQ dataset.
+    Create a DataLoader for CelebA-HQ or CelebA dataset.
 
     Convenience function to create a DataLoader with sensible defaults
     for FlexTok fine-tuning.
 
     Args:
+        dataset_type (str): Type of dataset ("celeba" or "celebahq").
         root_dir (str): Root directory containing CelebA-HQ images.
         img_size (int): Target image size. Default: 256.
         batch_size (int): Batch size. Default: 32.
@@ -256,7 +401,8 @@ def create_celebahq_dataloader(
 
     Examples:
         >>> # Basic usage
-        >>> train_loader = create_celebahq_dataloader(
+        >>> train_loader = create_celeba_dataloader(
+        ...     dataset_type="celebahq",
         ...     root_dir="/path/to/celeba_hq",
         ...     batch_size=32,
         ...     img_size=256
@@ -266,7 +412,8 @@ def create_celebahq_dataloader(
         ...     pass
 
         >>> # Validation loader
-        >>> val_loader = create_celebahq_dataloader(
+        >>> val_loader = create_celeba_dataloader(
+        ...     dataset_type="celebahq",
         ...     root_dir="/path/to/celeba_hq",
         ...     batch_size=64,
         ...     split="val",
@@ -279,7 +426,8 @@ def create_celebahq_dataloader(
         ...     transforms.RandomHorizontalFlip(p=0.5),
         ...     transforms.ColorJitter(brightness=0.1, contrast=0.1),
         ... ])
-        >>> train_loader = create_celebahq_dataloader(
+        >>> train_loader = create_celeba_dataloader(
+        ...     dataset_type="celebahq",
         ...     root_dir="/path/to/celeba_hq",
         ...     transform=train_transform,
         ...     batch_size=32
@@ -289,12 +437,22 @@ def create_celebahq_dataloader(
     if shuffle is None:
         shuffle = (split == "train")
 
-    dataset = CelebAHQDataset(
-        root_dir=root_dir,
-        img_size=img_size,
-        split=split,
-        transform=transform,
-    )
+    if dataset_type.lower() == "celebahq":
+        dataset = CelebAHQDataset(
+            root_dir=root_dir,
+            img_size=img_size,
+            split=split,
+            transform=transform,
+        )
+    elif dataset_type.lower() == "celeba":
+        dataset = CelebADataset(
+            root_dir=root_dir,
+            img_size=img_size,
+            split=split,
+            transform=transform,
+        )
+    else:
+        raise ValueError(f"Unsupported dataset_type: {dataset_type}. Supported types: 'celeba', 'celebahq'.")
 
     dataloader = DataLoader(
         dataset,

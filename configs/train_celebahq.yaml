@@ -15,20 +15,22 @@ train_encoder: true
 train_decoder: true
 train_vae: false
 
+train_from_scratch: false  # If true, ignores pretrained weights
+
 # Binary quantization levels for FlexTok (null to use all levels)
 fsq_levels: null
 
-# Disable gradient checkpointing for fine-tuning
-disable_gradient_checkpointing: false
+gradient_checkpointing: true  # Enable gradient checkpointing to save memory
 
 # ============================================================================
 # Data Configuration
 # ============================================================================
 
-# Path to CelebA-HQ dataset
+# Path to dataset
 # Expected structure: data_path/{00000.jpg, 00001.jpg, ...}
 # or data_path/images/{00000.jpg, 00001.jpg, ...}
-data_path: "./data/celeba_hq"
+dataset_name: "celebahq"
+data_path: "./data/${dataset_name}"
 
 # Image size (256, 512, or 1024 depending on your dataset)
 img_size: 256

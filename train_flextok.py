@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 # Import FlexTok components
 from flextok import FlexTokFromHub, model
-from flextok.utils.dataloader import create_celebahq_dataloader
+from flextok.utils.dataloader import create_celeb_dataloader
 from flextok.utils.demo import denormalize, batch_to_pil
 from flextok.regularizers.quantize_fsq import FSQ
 from flextok.model.postprocessors.heads import LinearHead
@@ -808,9 +808,12 @@ def main(cfg: DictConfig):
     model_name = config.get('model_name', 'EPFL-VILAB/flextok_d18_d28_dfn')
     model = FlexTokFromHub.from_pretrained(model_name)
     print(f"Loaded model: {model_name}")
+    if config.get("train_from_scratch", True):
+        print("  Training from scratch: reinitializing model weights")
+        model.apply(model._init_weights)
 
     # Disable gradient checkpointing if requested
-    if config.get('disable_gradient_checkpointing', False):
+    if not config.get('gradient_checkpointing', True):
         print("\nDisabling gradient checkpointing...")
 
         def unwrap_checkpoint_blocks(transformer_module):
@@ -907,7 +910,9 @@ def main(cfg: DictConfig):
     if config.get('use_augmentation', True):
         train_transforms = transforms.RandomHorizontalFlip(p=0.5)
 
-    train_loader = create_celebahq_dataloader(
+    dataset_name = config.get('dataset_name', 'celebahq')
+    train_loader = create_celeb_dataloader(
+        dataset_type=dataset_name,
         root_dir=config['data_path'],
         img_size=config.get('img_size', 256),
         batch_size=config.get('batch_size', 32),
@@ -916,7 +921,8 @@ def main(cfg: DictConfig):
         transform=train_transforms,
     )
 
-    val_loader = create_celebahq_dataloader(
+    val_loader = create_celeb_dataloader(
+        dataset_type=dataset_name,
         root_dir=config['data_path'],
         img_size=config.get('img_size', 256),
         batch_size=config.get('val_batch_size', config.get('batch_size', 32)),

@@ -55,12 +55,12 @@ st.markdown("""
 # FSQ levels configuration
 def parse_args(args):
     parser = argparse.ArgumentParser('Data Diagnostics')
-    parser.add_argument('-fsq', default=[8,8,8,5,5,5], help='CSV file', required=True)
+    parser.add_argument('--fsq', default=888555, help='CSV file', required=True)
     parser.add_argument('--output_dir', default="/home/iyu/flextok_first_token_samples/", help='Output directory', required=False)
     return parser.parse_args(args)
 
 args = parse_args(sys.argv[1:])
-FSQ_LEVELS = [int(x) for x in args.fsq]
+FSQ_LEVELS = [int(x) for x in str(args.fsq)]
 IMG_OUTPUT_DIR = args.output_dir
 
 def get_quant_values(level):
@@ -71,7 +71,7 @@ def get_quant_values(level):
 quant_values_per_level = [get_quant_values(level) for level in FSQ_LEVELS]
 
 def get_image_paths(quant_combo):
-    """Get paths for all 9 sample images for a given quantization combination"""
+    """Get paths for 9 sample images for a given quantization combination"""
     quant_str = "_".join([str(float(v)) for v in quant_combo])
     paths = []
     for sample_num in range(1, 10):
@@ -81,7 +81,7 @@ def get_image_paths(quant_combo):
 
 # Title and description
 st.title("🎨 FlexTok First Token Explorer")
-st.markdown("Explore 64,000 possible first tokens. FSQ levels: **[8, 8, 8, 5, 5, 5]**")
+st.markdown(f"Explore 64,000 possible first tokens. FSQ levels: **{FSQ_LEVELS}**")
 
 # Create sliders in a sidebar
 st.sidebar.header("FSQ Controls")
