@@ -196,7 +196,6 @@ class FlexTok(nn.Module):
         Returns:
             Data dict for decoding into images.
         """
-        device = token_ids_list[0].device
 
         # Token id lists may be truncated. First, pad them to the maximum length.
         max_register_tokens = self.encoder.module_dict["enc_register_module"].n_max

@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
+from torch.utils.checkpoint import checkpoint
 
 # Import FlexTok components
 from flextok import FlexTokFromHub, model
@@ -45,7 +46,19 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("WARNING: wandb not installed. Run 'pip install wandb' for experiment tracking.")
 
+class NonReentrantCheckpointWrapper(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self._checkpoint_wrapped_module = module
 
+    def forward(self, *args, **kwargs):
+        return checkpoint(
+            self._checkpoint_wrapped_module,
+            *args,
+            use_reentrant=False,  # Critical: allows non-deterministic ops
+            **kwargs
+        )
+                            
 class FlexTokTrainer:
     """
     Trainer class for fine-tuning FlexTok with flow matching.
@@ -753,11 +766,6 @@ class FlexTokTrainer:
         print(f"Mixed precision: {self.use_amp}")
         print(f"Gradient accumulation steps: {self.grad_accum_steps}")
         print(f"Wandb logging: {self.use_wandb}\n")
-        
-        # Validate before starting to test oom
-        val_metrics = self.validate(0)
-        print(f"Validation Loss: {val_metrics['loss']:.4f}")
-        torch.cuda.empty_cache()
 
         for epoch in range(start_epoch, num_epochs + 1):
             # Train
@@ -812,8 +820,10 @@ def main(cfg: DictConfig):
         print("  Training from scratch: reinitializing model weights")
         model.apply(model._init_weights)
 
-    # Disable gradient checkpointing if requested
-    if not config.get('gradient_checkpointing', True):
+    # Handle gradient checkpointing configuration
+    gradient_checkpointing = config.get('gradient_checkpointing', True)
+
+    if not gradient_checkpointing:
         print("\nDisabling gradient checkpointing...")
 
         def unwrap_checkpoint_blocks(transformer_module):
@@ -847,6 +857,46 @@ def main(cfg: DictConfig):
             dec_transformer = model.decoder.module_dict['dec_transformer']
             if unwrap_checkpoint_blocks(dec_transformer):
                 print("  Unwrapped checkpointed blocks in decoder transformer")
+
+    else:
+        # Fix gradient checkpointing to use use_reentrant=False for compatibility with FlexTok
+        # This is necessary because FlexTok's flexible token packing can produce different
+        # tensor shapes during forward/backward, which breaks the old reentrant checkpointing
+        print("\nFixing gradient checkpointing for FlexTok compatibility...")
+
+        def rewrap_checkpoint_blocks_non_reentrant(transformer_module):
+            """Rewrap checkpoint blocks to use use_reentrant=False."""
+            if not hasattr(transformer_module, 'blocks'):
+                return False
+
+            rewrapped_blocks = []
+            for block in transformer_module.blocks:
+                # Check if block is wrapped with checkpoint
+                if hasattr(block, '_checkpoint_wrapped_module'):
+                    # Get the unwrapped module
+                    unwrapped = block._checkpoint_wrapped_module
+                    # Rewrap with use_reentrant=False
+                    rewrapped_blocks.append(NonReentrantCheckpointWrapper(unwrapped))
+                else:
+                    # Not wrapped, just keep as is
+                    rewrapped_blocks.append(block)
+
+            # Replace blocks with rewrapped versions
+            import torch.nn as nn
+            transformer_module.blocks = nn.ModuleList(rewrapped_blocks)
+            return True
+
+        # Fix encoder transformer
+        if hasattr(model.encoder, 'module_dict') and 'enc_transformer' in model.encoder.module_dict:
+            enc_transformer = model.encoder.module_dict['enc_transformer']
+            if rewrap_checkpoint_blocks_non_reentrant(enc_transformer):
+                print("  Fixed encoder transformer checkpointing (use_reentrant=False)")
+
+        # Fix decoder transformer
+        if hasattr(model.decoder, 'module_dict') and 'dec_transformer' in model.decoder.module_dict:
+            dec_transformer = model.decoder.module_dict['dec_transformer']
+            if rewrap_checkpoint_blocks_non_reentrant(dec_transformer):
+                print("  Fixed decoder transformer checkpointing (use_reentrant=False)")
 
     # Optionally modify FSQ levels (e.g., to use binary quantization)
     if config.get('fsq_levels', None) is not None:
