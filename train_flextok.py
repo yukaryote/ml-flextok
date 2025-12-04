@@ -706,14 +706,14 @@ class FlexTokTrainer:
         # wandb.log_artifact(artifact)
         print(f"Saved checkpoint to {checkpoint_path}")
 
-        # Save epoch checkpoint
-        if epoch % self.save_every == 0:
-            epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pt'
-            torch.save(checkpoint, epoch_path)
-            # artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
-            # artifact.add_file(epoch_path)
-            # wandb.log_artifact(artifact)
-            print(f"Saved epoch checkpoint to {epoch_path}")
+        # Save epoch checkpoint (DON'T DO RN TO SAVE SPACE)
+        # if epoch % self.save_every == 0:
+        #     epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pt'
+        #     torch.save(checkpoint, epoch_path)
+        #     # artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
+        #     # artifact.add_file(epoch_path)
+        #     # wandb.log_artifact(artifact)
+        #     print(f"Saved epoch checkpoint to {epoch_path}")
 
         # Save best checkpoint
         if is_best:
@@ -951,6 +951,39 @@ def main(cfg: DictConfig):
         print(f"New FSQ configuration: {new_fsq}")
         print(f"  Codebook size: {new_fsq.codebook_size} (was {old_fsq.codebook_size})")
         print(f"  Dimensions: {new_fsq.dim} (was {old_fsq.dim})")
+
+    if config.get('use_attention_mask', True):
+        print("\nUsing attention mask instead of learned mask...")
+        from flextok.model.preprocessors.attention_masked_nested_dropout import AttentionMaskedNestedDropout
+        from flextok.model.preprocessors.nested_dropout_seq_packer import NestedDropoutSequencePacker
+        from flextok.model.preprocessors.token_dropout import MaskedNestedDropout
+        from flextok.model.preprocessors.flex_seq_packing import BlockWiseSequencePacker
+        old_dropout: MaskedNestedDropout = model.decoder.module_dict['dec_nested_dropout']
+        if old_dropout is None:
+            raise ValueError("Model does not have 'dec_nested_dropout' module to replace")
+        old_seq_packer: BlockWiseSequencePacker = model.decoder.module_dict['dec_seq_packer']
+        if old_seq_packer is None:
+            raise ValueError("Model does not have 'dec_seq_packer' module to replace")
+        new_dropout = AttentionMaskedNestedDropout(
+            read_write_key=old_dropout.read_write_key,
+        )
+        new_masking = NestedDropoutSequencePacker(
+            input_list_read_keys=old_seq_packer.input_list_read_keys,
+            packed_seq_write_key=old_seq_packer.packed_seq_write_key,
+            inner_packed_shapes_write_key=old_seq_packer.inner_packed_shapes_write_key,
+            outer_packed_shapes_write_key=old_seq_packer.outer_packed_shapes_write_key,
+            max_seq_len=old_seq_packer.max_seq_len,
+            block_mask_write_key=old_seq_packer.block_mask_write_key,
+            emb_packing_fn_write_key=old_seq_packer.emb_packing_fn_write_key,
+            pad_to_multiple=old_seq_packer.pad_to_multiple,
+            compile_block_mask=old_seq_packer.compile_block_mask,
+            return_materialized_mask=old_seq_packer.return_materialized_mask,
+            per_subseq_embs=old_seq_packer.per_subseq_embs,
+        )
+        
+        model.decoder.module_dict['dec_nested_dropout'] = new_dropout
+        model.decoder.module_dict['dec_seq_packer'] = new_masking
+        print("  Replaced nested dropout and sequence packer modules in decoder")
 
     # Create dataloaders
     print("\nCreating dataloaders...")

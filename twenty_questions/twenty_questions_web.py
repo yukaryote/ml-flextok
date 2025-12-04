@@ -36,6 +36,7 @@ class TwentyQuestionsGame:
         self.tokens_list: List[torch.Tensor] = []
         self.chosen_tokens: List[torch.Tensor] = []
         self.chosen_images: List[Image.Image] = []
+        self.rejected_images: List[Image.Image] = []
         self.current_question = 0
         self.max_questions = 20
         self.num_samples_per_quantization = 1
@@ -63,7 +64,7 @@ class TwentyQuestionsGame:
         self.tokens_list = zhat_to_tokens(self.flextok_model, all_zhats).unsqueeze(-1)
 
         # DEBUG: change last one to [[1]] instead of [[2]]
-        self.tokens_list[-1] = torch.tensor([[1]], device=self.tokens_list[-1].device)
+        #self.tokens_list[-1] = torch.tensor([[1]], device=self.tokens_list[-1].device)
         self.tokens_list = list(self.tokens_list.split(1))
         print("Possible tokens prepared.", self.tokens_list)
         self.game_initialized = True
@@ -74,6 +75,7 @@ class TwentyQuestionsGame:
         """Reset the game state."""
         self.chosen_tokens = []
         self.chosen_images = []
+        self.rejected_images = []
         self.current_question = 0
         self.current_images_dict = {}
         self.current_tokens = []
@@ -109,28 +111,34 @@ class TwentyQuestionsGame:
 
         return option_a_image, option_b_image, status
 
-    def make_choice(self, choice_idx: int) -> Tuple[Optional[Image.Image], str, List[Image.Image]]:
+    def make_choice(self, choice_idx: int) -> Tuple[Optional[Image.Image], str, List[Image.Image], List[Image.Image]]:
         """Process user's choice and prepare next question or final result."""
         if choice_idx >= len(self.current_tokens):
-            return None, "Invalid choice!", []
+            return None, "Invalid choice!", [], []
 
-        # Save the choice
+        # Save the choice and rejection
         chosen_token = self.current_tokens[choice_idx]
+        rejected_token = self.current_tokens[1 - choice_idx]  # The other option
+
         chosen_image_tensor = self.current_images_dict[chosen_token]
+        rejected_image_tensor = self.current_images_dict[rejected_token]
+
         chosen_image_pil = convert_images_to_pil(chosen_image_tensor[0])[0]
+        rejected_image_pil = convert_images_to_pil(rejected_image_tensor[0])[0]
 
         self.chosen_tokens.append(
             torch.tensor([[chosen_token]], device=self.tokens_list[0].device)
         )
         self.chosen_images.append(chosen_image_pil)
+        self.rejected_images.append(rejected_image_pil)
 
         # Check if game is complete
         if self.current_question >= self.max_questions:
             status = f"🎉 Game Complete! You've answered all {self.max_questions} questions."
-            return None, status, self.chosen_images
+            return None, status, self.chosen_images, self.rejected_images
 
         status = f"Choice saved! Generating question {self.current_question + 1}/{self.max_questions}..."
-        return None, status, self.chosen_images
+        return None, status, self.chosen_images, self.rejected_images
 
 
 # Global game instance
@@ -154,13 +162,14 @@ def start_new_game():
         gr.update(interactive=True),  # choose_a_btn
         gr.update(interactive=True),  # choose_b_btn
         [],  # choice_history
+        [],  # rejected_history
         gr.update(visible=False),  # final_result
     )
 
 
 def choose_option_a():
     """Handle choosing Option A."""
-    _, status, history = game.make_choice(0)
+    _, status, chosen_history, rejected_history = game.make_choice(0)
 
     if game.current_question >= game.max_questions:
         # Game complete
@@ -171,7 +180,8 @@ def choose_option_a():
             status,  # status_text
             gr.update(interactive=False),  # choose_a_btn
             gr.update(interactive=False),  # choose_b_btn
-            history,  # choice_history
+            chosen_history,  # choice_history
+            rejected_history,  # rejected_history
             gr.update(value=final_image, visible=True),  # final_result
         )
 
@@ -185,14 +195,15 @@ def choose_option_a():
         status,  # status_text
         gr.update(interactive=True),  # choose_a_btn
         gr.update(interactive=True),  # choose_b_btn
-        history,  # choice_history
+        chosen_history,  # choice_history
+        rejected_history,  # rejected_history
         gr.update(visible=False),  # final_result
     )
 
 
 def choose_option_b():
     """Handle choosing Option B."""
-    _, status, history = game.make_choice(1)
+    _, status, chosen_history, rejected_history = game.make_choice(1)
 
     if game.current_question >= game.max_questions:
         # Game complete
@@ -203,7 +214,8 @@ def choose_option_b():
             status,  # status_text
             gr.update(interactive=False),  # choose_a_btn
             gr.update(interactive=False),  # choose_b_btn
-            history,  # choice_history
+            chosen_history,  # choice_history
+            rejected_history,  # rejected_history
             gr.update(value=final_image, visible=True),  # final_result
         )
 
@@ -217,7 +229,8 @@ def choose_option_b():
         status,  # status_text
         gr.update(interactive=True),  # choose_a_btn
         gr.update(interactive=True),  # choose_b_btn
-        history,  # choice_history
+        chosen_history,  # choice_history
+        rejected_history,  # rejected_history
         gr.update(visible=False),  # final_result
     )
 
@@ -250,9 +263,21 @@ def create_ui():
         # Choice history
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 📜 Your Choice History")
+                gr.Markdown("### ✅ Chosen Images")
                 choice_history = gr.Gallery(
-                    label="Choices Made So Far",
+                    label="Your Chosen Images",
+                    columns=[20],
+                    rows=1,
+                    height=80,
+                    object_fit="contain",
+                    preview=False
+                )
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### ❌ Rejected Images")
+                rejected_history = gr.Gallery(
+                    label="Your Rejected Images",
                     columns=[20],
                     rows=1,
                     height=80,
@@ -318,6 +343,7 @@ def create_ui():
                 choose_a_btn,
                 choose_b_btn,
                 choice_history,
+                rejected_history,
                 final_result
             ]
         )
@@ -332,6 +358,7 @@ def create_ui():
                 choose_a_btn,
                 choose_b_btn,
                 choice_history,
+                rejected_history,
                 final_result
             ]
         )
@@ -346,6 +373,7 @@ def create_ui():
                 choose_a_btn,
                 choose_b_btn,
                 choice_history,
+                rejected_history,
                 final_result
             ]
         )

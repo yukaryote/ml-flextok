@@ -16,7 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 
-__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeba_dataloader", "create_celebahq_dataloader"]
+__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeb_dataloader"]
 
 
 class _BaseCelebADataset(Dataset):

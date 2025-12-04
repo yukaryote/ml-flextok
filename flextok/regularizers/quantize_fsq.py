@@ -170,7 +170,7 @@ class FSQ(nn.Module):
     ) -> Tensor:
         """Inverse of `codes_to_indices`."""
         indices = rearrange(indices, "... -> ... 1")
-        codes_non_centered = (indices // self._basis) % self._levels
+        codes_non_centered = (indices // self._basis)# % self._levels
         codes = self._scale_and_shift_inverse(codes_non_centered)
         return codes
 

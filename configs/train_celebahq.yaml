@@ -20,6 +20,9 @@ train_from_scratch: false  # If true, ignores pretrained weights
 # Binary quantization levels for FlexTok (null to use all levels)
 fsq_levels: null
 
+# Use attention masking (vanilla FlexTok uses learned mask token by default)
+use_attention_mask: false
+
 gradient_checkpointing: true  # Enable gradient checkpointing to save memory (disable when changing fsq_levels)
 
 # ============================================================================
@@ -120,7 +123,7 @@ perform_norm_guidance: true
 
 # Token counts to visualize in flexible-length reconstructions
 # Shows how the model progressively builds up the image with more tokens
-vis_token_counts: [1, 2, 3, 4, 16, 256]
+vis_token_counts: [1, 2, 3, 4, 16, 64, 256]
 
 # ============================================================================
 # Checkpointing
