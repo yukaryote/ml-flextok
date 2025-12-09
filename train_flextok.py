@@ -818,7 +818,28 @@ def main(cfg: DictConfig):
     print(f"Loaded model: {model_name}")
     if config.get("train_from_scratch", True):
         print("  Training from scratch: reinitializing model weights")
-        model.apply(model._init_weights)
+
+        # Custom initialization function that uses standard PyTorch initialization
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                if m.elementwise_affine:
+                    nn.init.constant_(m.weight, 1)
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+        # Apply standard initialization to encoder and decoder
+        model.encoder.apply(init_weights)
+        model.decoder.apply(init_weights)
+        print("  Applied standard PyTorch initialization to encoder and decoder")
 
     # Handle gradient checkpointing configuration
     gradient_checkpointing = config.get('gradient_checkpointing', True)

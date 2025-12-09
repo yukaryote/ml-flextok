@@ -31,7 +31,8 @@ class _BaseCelebADataset(Dataset):
         "val": (27000, 28500),  # To be defined in subclasses
         "test": (28500, 30000),  # To be defined in subclasses
         "all": (0, 30000),  # To be defined in subclasses
-    }  # To be defined in subclasses
+    }
+
     def __init__(
         self,
         root_dir: str,
@@ -365,6 +366,25 @@ class CelebAHQDataset(_BaseCelebADataset):
         super().__init__(root_dir, img_size, split, transform, return_path, extensions)
 
 
+class SyntheticFaceDataset(_BaseCelebADataset):
+    SPLIT_INDICES = {
+        "train": (0, 59999),
+        "val": (60000, 67999),
+        "test": (68000, 71999),
+        "all": (0, 71999),
+    }
+    def __init__(
+        self,
+        root_dir: str,
+        img_size: int = 256,
+        split: str = "train",
+        transform: Optional[Callable] = None,
+        return_path: bool = False,
+        extensions: List[str] = None,
+    ):
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
+
+
 def create_celeb_dataloader(
     dataset_type: str,
     root_dir: str,
@@ -451,8 +471,15 @@ def create_celeb_dataloader(
             split=split,
             transform=transform,
         )
+    elif dataset_type.lower() == "synth_faces":
+        dataset = SyntheticFaceDataset(
+            root_dir=root_dir,
+            img_size=img_size,
+            split=split,
+            transform=transform,
+        )
     else:
-        raise ValueError(f"Unsupported dataset_type: {dataset_type}. Supported types: 'celeba', 'celebahq'.")
+        raise ValueError(f"Unsupported dataset_type: {dataset_type}. Supported types: 'celeba', 'celebahq', 'synth_faces'.")
 
     dataloader = DataLoader(
         dataset,

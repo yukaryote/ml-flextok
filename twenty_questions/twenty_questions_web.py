@@ -55,8 +55,8 @@ class TwentyQuestionsGame:
         self.flextok_model = load_flextok_model(
             model_name='EPFL-VILAB/flextok_d18_d18_in1k',
             bf16=self.enable_bf16,
-            ckpt_path="/home/iyu/ml-flextok/checkpoints/celebahq_d18_fsq_2/20251119/checkpoint_latest.pt",
-            fsq_level=[2]
+            ckpt_path="/home/iyu/ml-flextok/checkpoints/celeba_d18_fsq_4/20251202/checkpoint_best.pt",
+            fsq_level=[4]
         )
 
         # Get all possible tokens

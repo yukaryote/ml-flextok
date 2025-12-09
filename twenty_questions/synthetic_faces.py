@@ -31,17 +31,6 @@ class SyntheticFaceGenerator:
         self.nose_radius = 10
         self.mouth_pos = (self.size[0] // 2, 2 * self.size[1] // 3)
         self.mouth_radius = 16
-
-    def __len__(self):
-        """
-        Number of possible faces, minus invalid combinations (e.g., some/all features same color as the face).
-        """
-        return len(self.eye_shapes) * \
-            len(self.face_shapes) * \
-            len(self.nose_shapes) * \
-            len(self.mouth_shapes) * \
-            len(self.colors)**4 - \
-            (len(self.colors) + len(self.colors)*3 - len(self.colors)*3)  # all same color as face + 2 features same color + 1 feature same color
     
     def draw_face(self, face_dict: dict, save_path=None) -> Image.Image:
         """
