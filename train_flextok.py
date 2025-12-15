@@ -730,7 +730,7 @@ class FlexTokTrainer:
 
     def load_checkpoint(self, checkpoint_path: str):
         """Load training checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -973,6 +973,18 @@ def main(cfg: DictConfig):
         print(f"  Codebook size: {new_fsq.codebook_size} (was {old_fsq.codebook_size})")
         print(f"  Dimensions: {new_fsq.dim} (was {old_fsq.dim})")
 
+    # optionally change number of register tokens
+    if config.get('num_max_tokens', None) is not None:
+        from flextok.model.preprocessors.registers import Registers1D
+        from flextok.model.utils.posembs import PositionalEmbeddingAdder
+        new_num_tokens = config['num_max_tokens']
+        registers: Registers1D = model.encoder.module_dict['enc_register_module']
+        print(f"\nModifying number of max tokens from {registers.n_max} to {new_num_tokens}")
+        registers.n_min = new_num_tokens
+        registers.n_max = new_num_tokens
+        print(f"  Updated encoder registers: {registers.n_min}")
+
+    # Optionally replace learned mask with attention mask
     if config.get('use_attention_mask', True):
         print("\nUsing attention mask instead of learned mask...")
         from flextok.model.preprocessors.attention_masked_nested_dropout import AttentionMaskedNestedDropout
