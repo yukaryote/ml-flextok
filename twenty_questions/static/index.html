@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>20 Questions</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>20 Questions</h1>
+            <p class="subtitle">Think of a face. Choose the option that matches better.</p>
+        </header>
+
+        <!-- Progress -->
+        <div id="progress" class="progress">
+            <div class="progress-text">Ready to start</div>
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="status" class="status">Click "Start Game" to begin</div>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Generating images...</p>
+        </div>
+
+        <!-- Game Area -->
+        <div id="game-area" class="game-area hidden">
+            <!-- Options -->
+            <div class="options">
+                <div class="option" id="option-a">
+                    <img id="img-a" src="" alt="Option A">
+                    <button class="btn btn-primary" onclick="chooseOption('a')">Choose A</button>
+                </div>
+                <div class="option" id="option-b">
+                    <img id="img-b" src="" alt="Option B">
+                    <button class="btn btn-primary" onclick="chooseOption('b')">Choose B</button>
+                </div>
+            </div>
+
+            <!-- History -->
+            <div class="history">
+                <div class="history-section">
+                    <h3>✓ Chosen</h3>
+                    <div id="chosen-history" class="history-strip"></div>
+                </div>
+                <div class="history-section">
+                    <h3>✗ Rejected</h3>
+                    <div id="rejected-history" class="history-strip"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Final Result -->
+        <div id="final-result" class="final-result hidden">
+            <h2>Your Face</h2>
+            <img id="final-img" src="" alt="Final Result">
+        </div>
+
+        <!-- Start Button -->
+        <div class="controls">
+            <button id="start-btn" class="btn btn-large" onclick="startGame()">Start Game</button>
+            <button id="restart-btn" class="btn btn-secondary hidden" onclick="startGame()">Play Again</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
