@@ -27,6 +27,10 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_grad_enabled(False)
 
+# Increase torch dynamo recompile limit to handle variable sequence lengths
+import torch._dynamo
+torch._dynamo.config.cache_size_limit = 20  # Increase from default 8 to 13
+
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)  # Enable CORS for frontend-backend communication
 
@@ -43,6 +47,7 @@ class GameState:
         self.current_question = 0
         self.max_questions = 20
         self.num_samples_per_quantization = 1
+        self.num_options = 4  # Number of options per question (n-ary choice)
         self.enable_bf16 = detect_bf16_support()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.current_images_dict: Dict[int, torch.Tensor] = {}
@@ -53,18 +58,21 @@ class GameState:
         """Initialize the FlexTok model."""
         if self.initialized:
             return {"status": "already_initialized"}
-
+        fsq_level = self.num_options
         print("Initializing model...")
         self.flextok_model = load_flextok_model(
             model_name='EPFL-VILAB/flextok_d18_d18_in1k',
             bf16=self.enable_bf16,
             ckpt_path="/home/iyu/ml-flextok/checkpoints/celeba_d18_fsq_4/20251202/checkpoint_best.pt",
-            fsq_level=[4]
+            fsq_level=[fsq_level]
         )
 
         # Get all possible tokens
         all_zhats = get_possible_combos(self.flextok_model).to(self.device)
         self.tokens_list = zhat_to_tokens(self.flextok_model, all_zhats).unsqueeze(-1)
+
+        # DEBUG: change last one to [[1]] instead of [[2]]
+        self.tokens_list[-1] = torch.tensor([[fsq_level - 1]], device=self.tokens_list[-1].device)
         self.tokens_list = list(self.tokens_list.split(1))
         print(f"Possible tokens prepared. Count: {len(self.tokens_list)}")
         self.initialized = True
@@ -87,10 +95,12 @@ class GameState:
 
         self.current_question += 1
 
-        # Sample images from tokens
+        # Sample images from tokens (limit to num_options)
+        tokens_to_sample = self.tokens_list[:self.num_options]
+
         images_dict = sample_images_per_quantization(
             self.flextok_model,
-            self.tokens_list,
+            tokens_to_sample,
             num_samples_per_quantization=self.num_samples_per_quantization,
             condition_tokens=self.chosen_tokens,
             bf16=self.enable_bf16
@@ -99,34 +109,37 @@ class GameState:
         self.current_images_dict = images_dict
         self.current_tokens = list(images_dict.keys())
 
-        # Convert to PIL images
-        option_a_image = convert_images_to_pil(images_dict[self.current_tokens[0]][0])[0]
-        option_b_image = convert_images_to_pil(images_dict[self.current_tokens[1]][0])[0]
+        # Convert to PIL images for all options
+        option_images = []
+        for i in range(len(self.current_tokens)):
+            img = convert_images_to_pil(images_dict[self.current_tokens[i]][0])[0]
+            option_images.append(img)
 
-        return option_a_image, option_b_image
+        return option_images
 
     def make_choice(self, choice_idx: int):
         """Process user's choice."""
-        if choice_idx not in [0, 1]:
-            raise ValueError("Invalid choice")
 
-        # Save the choice and rejection
+        # Save the chosen token and image
         chosen_token = self.current_tokens[choice_idx]
-        rejected_token = self.current_tokens[1 - choice_idx]
-
         chosen_image_tensor = self.current_images_dict[chosen_token]
-        rejected_image_tensor = self.current_images_dict[rejected_token]
-
         chosen_image_pil = convert_images_to_pil(chosen_image_tensor[0])[0]
-        rejected_image_pil = convert_images_to_pil(rejected_image_tensor[0])[0]
 
         self.chosen_tokens.append(
             torch.tensor([[chosen_token]], device=self.tokens_list[0].device)
         )
         self.chosen_images.append(chosen_image_pil)
-        self.rejected_images.append(rejected_image_pil)
 
-        return chosen_image_pil, rejected_image_pil
+        # Save all rejected images (all options except the chosen one)
+        rejected_images = []
+        for i, token in enumerate(self.current_tokens):
+            if i != choice_idx:
+                rejected_image_tensor = self.current_images_dict[token]
+                rejected_image_pil = convert_images_to_pil(rejected_image_tensor[0])[0]
+                rejected_images.append(rejected_image_pil)
+                self.rejected_images.append(rejected_image_pil)
+
+        return chosen_image_pil, rejected_images
 
 
 # Global game state
@@ -163,15 +176,18 @@ def init_game():
         game_state.reset_game()
 
         # Generate first question
-        option_a, option_b = game_state.generate_question()
+        option_images = game_state.generate_question()
 
-        return jsonify({
+        # Create response with all options
+        response = {
             "status": "success",
             "question": 1,
             "max_questions": game_state.max_questions,
-            "option_a": image_to_base64(option_a),
-            "option_b": image_to_base64(option_b)
-        })
+            "num_options": game_state.num_options,
+            "options": [image_to_base64(img) for img in option_images]
+        }
+
+        return jsonify(response)
 
     except Exception as e:
         import traceback
@@ -186,15 +202,13 @@ def make_choice():
     """Process user's choice and get next question."""
     try:
         data = request.json
-        choice = data.get('choice')  # 'a' or 'b'
+        choice_idx = data.get('choice')  # Integer index (0, 1, 2, ...)
 
-        if choice not in ['a', 'b']:
-            return jsonify({"error": "Invalid choice"}), 400
-
-        choice_idx = 0 if choice == 'a' else 1
+        if not isinstance(choice_idx, int) or choice_idx < 0 or choice_idx >= game_state.num_options:
+            return jsonify({"error": f"Invalid choice. Must be 0-{game_state.num_options-1}"}), 400
 
         # Record the choice
-        chosen_img, rejected_img = game_state.make_choice(choice_idx)
+        chosen_img, rejected_imgs = game_state.make_choice(choice_idx)
 
         # Check if game is complete
         if game_state.current_question >= game_state.max_questions:
@@ -202,28 +216,31 @@ def make_choice():
                 "status": "complete",
                 "question": game_state.current_question,
                 "chosen": image_to_base64(chosen_img),
-                "rejected": image_to_base64(rejected_img),
+                "rejected": [image_to_base64(img) for img in rejected_imgs],
                 "final_image": image_to_base64(game_state.chosen_images[-1]),
                 "chosen_history": [image_to_base64(img) for img in game_state.chosen_images],
                 "rejected_history": [image_to_base64(img) for img in game_state.rejected_images]
             })
 
         # Generate next question
-        option_a, option_b = game_state.generate_question()
+        option_images = game_state.generate_question()
 
         return jsonify({
             "status": "continue",
             "question": game_state.current_question,
             "max_questions": game_state.max_questions,
+            "num_options": game_state.num_options,
             "chosen": image_to_base64(chosen_img),
-            "rejected": image_to_base64(rejected_img),
-            "option_a": image_to_base64(option_a),
-            "option_b": image_to_base64(option_b)
+            "rejected": [image_to_base64(img) for img in rejected_imgs],
+            "options": [image_to_base64(img) for img in option_images]
         })
 
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
         print(f"Error in make_choice: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(error_details)
+        return jsonify({"error": str(e), "details": error_details}), 500
 
 
 @app.route('/api/status', methods=['GET'])
@@ -233,6 +250,7 @@ def get_status():
         "initialized": game_state.initialized,
         "current_question": game_state.current_question,
         "max_questions": game_state.max_questions,
+        "num_options": game_state.num_options,
         "device": game_state.device
     })
 

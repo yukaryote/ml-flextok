@@ -16,8 +16,7 @@ const elements = {
     finalResult: document.getElementById('final-result'),
     startBtn: document.getElementById('start-btn'),
     restartBtn: document.getElementById('restart-btn'),
-    imgA: document.getElementById('img-a'),
-    imgB: document.getElementById('img-b'),
+    optionsContainer: document.getElementById('options-container'),
     finalImg: document.getElementById('final-img'),
     chosenHistory: document.getElementById('chosen-history'),
     rejectedHistory: document.getElementById('rejected-history')
@@ -59,6 +58,29 @@ function updateStatus(message) {
     elements.status.textContent = message;
 }
 
+// Display options dynamically
+function displayOptions(optionImages) {
+    elements.optionsContainer.innerHTML = '';
+
+    optionImages.forEach((imgBase64, index) => {
+        const optionDiv = document.createElement('div');
+        optionDiv.className = 'option';
+
+        const img = document.createElement('img');
+        img.src = imgBase64;
+        img.alt = `Option ${index + 1}`;
+
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-primary';
+        btn.textContent = `Choose ${index + 1}`;
+        btn.onclick = () => chooseOption(index);
+
+        optionDiv.appendChild(img);
+        optionDiv.appendChild(btn);
+        elements.optionsContainer.appendChild(optionDiv);
+    });
+}
+
 // Start new game
 async function startGame() {
     try {
@@ -88,8 +110,7 @@ async function startGame() {
         isGameActive = true;
 
         // Display options
-        elements.imgA.src = data.option_a;
-        elements.imgB.src = data.option_b;
+        displayOptions(data.options);
 
         hide(elements.loading);
         show(elements.gameArea);
@@ -110,7 +131,7 @@ async function startGame() {
 }
 
 // Make choice
-async function chooseOption(choice) {
+async function chooseOption(choiceIndex) {
     if (!isGameActive) return;
 
     try {
@@ -120,7 +141,7 @@ async function chooseOption(choice) {
         const response = await fetch(`${API_URL}/choose`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ choice })
+            body: JSON.stringify({ choice: choiceIndex })
         });
 
         if (!response.ok) {
@@ -149,8 +170,8 @@ async function chooseOption(choice) {
             currentQuestion = data.question;
             updateProgress();
 
-            elements.imgA.src = data.option_a;
-            elements.imgB.src = data.option_b;
+            // Display new options
+            displayOptions(data.options);
 
             hide(elements.loading);
             show(elements.gameArea);
@@ -166,18 +187,22 @@ async function chooseOption(choice) {
 }
 
 // Add images to history
-function addToHistory(chosenBase64, rejectedBase64) {
+function addToHistory(chosenBase64, rejectedBase64Array) {
     // Add chosen image
     const chosenImg = document.createElement('img');
     chosenImg.src = chosenBase64;
     chosenImg.alt = 'Chosen';
     elements.chosenHistory.appendChild(chosenImg);
 
-    // Add rejected image
-    const rejectedImg = document.createElement('img');
-    rejectedImg.src = rejectedBase64;
-    rejectedImg.alt = 'Rejected';
-    elements.rejectedHistory.appendChild(rejectedImg);
+    // Add rejected images (may be multiple)
+    if (Array.isArray(rejectedBase64Array)) {
+        rejectedBase64Array.forEach(rejectedBase64 => {
+            const rejectedImg = document.createElement('img');
+            rejectedImg.src = rejectedBase64;
+            rejectedImg.alt = 'Rejected';
+            elements.rejectedHistory.appendChild(rejectedImg);
+        });
+    }
 
     // Auto-scroll to latest
     elements.chosenHistory.scrollLeft = elements.chosenHistory.scrollWidth;
