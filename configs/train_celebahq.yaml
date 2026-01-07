@@ -178,3 +178,30 @@ repa_target_size: [37, 37]
 
 # Separate learning rate for REPA projector (optional)
 repa_lr: 1.0e-4
+
+# ============================================================================
+# ArcFace Loss Configuration
+# ============================================================================
+
+# Enable ArcFace identity preservation loss
+use_arcface: false
+
+# Weight for ArcFace loss (recommend 0.1-1.0 for identity preservation)
+arcface_weight: 0.5
+
+# Pretrained ArcFace model name from InsightFace
+# Options: 'buffalo_l', 'buffalo_s', 'antelopev2'
+# - buffalo_l: Larger model, better accuracy (~200MB)
+# - buffalo_s: Smaller model, faster inference (~100MB)
+arcface_model_name: 'buffalo_l'
+
+# Root directory for insightface models (models will be auto-downloaded)
+arcface_root: '~/.insightface'
+
+# Embedding size (typically 512 for most ArcFace models)
+arcface_embedding_size: 512
+
+# Whether to use positive pairs sampling for contrastive learning
+# If true, dataloader will sample same-identity pairs within batch
+# If false, only compares original vs reconstructed for each image
+arcface_use_pairs: false

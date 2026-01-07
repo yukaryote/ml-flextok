@@ -8,15 +8,16 @@ with preprocessing suitable for FlexTok training.
 """
 
 from pathlib import Path
-from typing import Optional, Tuple, Callable, List
+from typing import Optional, Tuple, Callable, List, Dict
 import warnings
+import random
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 
-__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeb_dataloader"]
+__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeb_dataloader", "identity_aware_collate_fn"]
 
 
 class _BaseCelebADataset(Dataset):
@@ -41,12 +42,14 @@ class _BaseCelebADataset(Dataset):
         transform: Optional[Callable],
         return_path: bool,
         extensions: List[str] = None,
+        return_identity: bool = False,
     ):
         self.root_dir = Path(root_dir)
         self.img_size = img_size
         self.split = split
         self.custom_transform = transform
         self.return_path = return_path
+        self.return_identity = return_identity
 
         if extensions is None:
             extensions = [".jpg", ".png", ".jpeg"]
@@ -59,12 +62,18 @@ class _BaseCelebADataset(Dataset):
             )
 
         # Find all image files
-        self.image_paths = self._find_images()
+        self.image_paths, self.id_to_img_path, self.img_path_to_id = self._find_images()
 
         if len(self.image_paths) == 0:
             raise ValueError(
                 f"No images found in {self.root_dir}. "
                 f"Please check the directory structure and file extensions."
+            )
+
+        if len(self.id_to_img_path) == 0:
+            warnings.warn(
+                f"No ID mapping file found in {self.root_dir / 'ids'}. "
+                f"Continuing without ID mappings."
             )
 
         # Apply split
@@ -86,7 +95,7 @@ class _BaseCelebADataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.image_paths)
-    
+        
     def _find_images(self) -> List[Path]:
         """
         Find all image files in the root directory.
@@ -95,6 +104,8 @@ class _BaseCelebADataset(Dataset):
         Sorts files numerically by stem (filename without extension).
         """
         image_paths = []
+        id_to_img_path = {}
+        img_path_to_id = {}
 
         # Search in root_dir
         for ext in self.extensions:
@@ -102,9 +113,25 @@ class _BaseCelebADataset(Dataset):
 
         # Also search in root_dir/images if it exists
         images_subdir = self.root_dir / "images"
+        ids_subdir = self.root_dir / "ids"
+
         if images_subdir.exists():
             for ext in self.extensions:
                 image_paths.extend(images_subdir.glob(f"*{ext}"))
+        
+        if ids_subdir.exists():
+            id_files = list(ids_subdir.glob("*.txt"))
+            assert len(id_files) == 1, "Expected exactly one .txt file in ids/ directory."
+            # Map IDs to image paths
+            # each line in txt file is formatted as: <image_filename> <id>
+            with open(id_files[0], 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) == 2:
+                        filename, img_id = parts
+                        img_path = images_subdir / filename
+                        id_to_img_path.setdefault(img_id, []).append(img_path)
+                        img_path_to_id[img_path] = img_id
 
         # Sort by numeric stem (e.g., "00000.jpg" -> 0, "00001.jpg" -> 1)
         def sort_key(path):
@@ -114,7 +141,8 @@ class _BaseCelebADataset(Dataset):
                 return path.stem
 
         image_paths = sorted(image_paths, key=sort_key)
-        return image_paths
+
+        return image_paths, id_to_img_path, img_path_to_id
     
     def _create_base_transform(
         self,
@@ -178,7 +206,9 @@ class _BaseCelebADataset(Dataset):
 
         Returns:
             Image tensor of shape (3, img_size, img_size) normalized to [-1, 1],
-            or (image, path) tuple if return_path=True.
+            or (image, path) tuple if return_path=True,
+            or (image, identity_id) if return_identity=True,
+            or (image, path, identity_id) if both are True.
         """
         img_path = self.image_paths[idx]
 
@@ -210,8 +240,18 @@ class _BaseCelebADataset(Dataset):
         # Apply transforms using base class helper
         img = self._apply_transforms(img)
 
-        if self.return_path:
+        # Get identity ID if requested
+        identity_id = None
+        if self.return_identity:
+            identity_id = self.img_path_to_id.get(img_path, "-1")
+
+        # Return based on flags
+        if self.return_path and self.return_identity:
+            return img, str(img_path), identity_id
+        elif self.return_path:
             return img, str(img_path)
+        elif self.return_identity:
+            return img, identity_id
         return img
 
 
@@ -290,9 +330,10 @@ class CelebADataset(_BaseCelebADataset):
         transform: Optional[Callable] = None,
         return_path: bool = False,
         extensions: List[str] = None,
+        return_identity: bool = False,
     ):
         # Initialize base class
-        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions, return_identity)
 
 
 class CelebAHQDataset(_BaseCelebADataset):
@@ -361,9 +402,10 @@ class CelebAHQDataset(_BaseCelebADataset):
         transform: Optional[Callable] = None,
         return_path: bool = False,
         extensions: List[str] = None,
+        return_identity: bool = False,
     ):
         # Initialize base class
-        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions, return_identity)
 
 
 class SyntheticFaceDataset(_BaseCelebADataset):
@@ -381,8 +423,72 @@ class SyntheticFaceDataset(_BaseCelebADataset):
         transform: Optional[Callable] = None,
         return_path: bool = False,
         extensions: List[str] = None,
+        return_identity: bool = False,
     ):
-        super().__init__(root_dir, img_size, split, transform, return_path, extensions)
+        super().__init__(root_dir, img_size, split, transform, return_path, extensions, return_identity)
+
+
+def identity_aware_collate_fn(batch: List[Tuple[torch.Tensor, str]]) -> Dict[str, torch.Tensor]:
+    """
+    Custom collate function that creates positive pairs for identity-based learning.
+
+    For each image in the batch, this function attempts to find another image with
+    the same identity to create positive pairs for ArcFace loss training.
+
+    Args:
+        batch: List of (image, identity_id) tuples from dataset
+
+    Returns:
+        Dictionary containing:
+            - 'images': Stacked image tensors (B, 3, H, W)
+            - 'identity_ids': Identity labels (B,)
+            - 'positive_pairs': Same-identity pairs if available (B, 3, H, W)
+            - 'has_pairs': Boolean mask indicating which samples have valid pairs (B,)
+    """
+    images = []
+    identity_ids = []
+
+    # Group by identity
+    identity_groups: Dict[str, List[torch.Tensor]] = {}
+
+    for img, identity_id in batch:
+        images.append(img)
+        identity_ids.append(identity_id)
+
+        if identity_id not in identity_groups:
+            identity_groups[identity_id] = []
+        identity_groups[identity_id].append(img)
+
+    # Create positive pairs
+    positive_pairs = []
+    has_pairs = []
+
+    for img, identity_id in batch:
+        # Get all images with the same identity
+        same_identity_imgs = identity_groups.get(identity_id, [])
+
+        if len(same_identity_imgs) > 1:
+            # Sample a different image with same identity
+            available_pairs = [p for p in same_identity_imgs if not torch.equal(p, img)]
+            if available_pairs:
+                pair = random.choice(available_pairs)
+                positive_pairs.append(pair)
+                has_pairs.append(True)
+            else:
+                # No different image available, use the same image
+                positive_pairs.append(img)
+                has_pairs.append(False)
+        else:
+            # No pair available for this identity
+            positive_pairs.append(img)  # Use same image as placeholder
+            has_pairs.append(False)
+
+    return {
+        'images': torch.stack(images, dim=0),
+        'identity_ids': identity_ids,
+        'positive_pairs': torch.stack(positive_pairs, dim=0),
+        'has_pairs': torch.tensor(has_pairs, dtype=torch.bool),
+    }
 
 
 def create_celeb_dataloader(
@@ -395,6 +501,8 @@ def create_celeb_dataloader(
     num_workers: int = 4,
     pin_memory: bool = True,
     transform: Optional[Callable] = None,
+    return_identity: bool = False,
+    use_identity_collate: bool = False,
     **kwargs
 ) -> DataLoader:
     """
@@ -463,6 +571,7 @@ def create_celeb_dataloader(
             img_size=img_size,
             split=split,
             transform=transform,
+            return_identity=return_identity,
         )
     elif dataset_type.lower() == "celeba":
         dataset = CelebADataset(
@@ -470,6 +579,7 @@ def create_celeb_dataloader(
             img_size=img_size,
             split=split,
             transform=transform,
+            return_identity=return_identity,
         )
     elif dataset_type.lower() == "synth_faces":
         dataset = SyntheticFaceDataset(
@@ -477,9 +587,13 @@ def create_celeb_dataloader(
             img_size=img_size,
             split=split,
             transform=transform,
+            return_identity=return_identity,
         )
     else:
         raise ValueError(f"Unsupported dataset_type: {dataset_type}. Supported types: 'celeba', 'celebahq', 'synth_faces'.")
+
+    # Use custom collate function if requested and identity is enabled
+    collate_fn = identity_aware_collate_fn if (return_identity and use_identity_collate) else None
 
     dataloader = DataLoader(
         dataset,
@@ -487,6 +601,7 @@ def create_celeb_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        collate_fn=collate_fn,
         **kwargs
     )
 

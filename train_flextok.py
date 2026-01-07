@@ -151,6 +151,24 @@ class FlexTokTrainer:
             print(f"  Target size: {config.get('repa_target_size', [37, 37])}")
             print(f"  REPA weight: {self.repa_weight}")
 
+        # ArcFace Loss (optional)
+        self.use_arcface = config.get('use_arcface', False)
+        self.arcface_weight = config.get('arcface_weight', 0.5)
+        if self.use_arcface:
+            from flextok.model.utils.arcface_loss import ArcFaceModule
+
+            # Initialize ArcFace module with frozen pretrained model
+            self.arcface_module = ArcFaceModule(
+                model_name=config.get('arcface_model_name', 'buffalo_l'),
+                root=config.get('arcface_root', '~/.insightface'),
+                embedding_size=config.get('arcface_embedding_size', 512),
+            ).to(device)
+
+            print(f"\nInitialized ArcFace module:")
+            print(f"  Model: {config.get('arcface_model_name', 'buffalo_l')}")
+            print(f"  Embedding size: {config.get('arcface_embedding_size', 512)}")
+            print(f"  ArcFace weight: {self.arcface_weight}")
+
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer for training."""
         config = self.config
@@ -283,18 +301,30 @@ class FlexTokTrainer:
             for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters()):
                 ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
 
-    def compute_loss(self, batch: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def compute_loss(self, batch) -> Dict[str, torch.Tensor]:
         """
-        Compute flow matching loss + REPA loss for a batch of images.
+        Compute flow matching loss + REPA loss + ArcFace loss for a batch of images.
 
         Args:
-            batch: Batch of images, shape (B, 3, H, W), normalized to [-1, 1]
+            batch: Either:
+                - Batch of images: (B, 3, H, W), normalized to [-1, 1]
+                - Dictionary with 'images', 'positive_pairs', 'has_pairs' (if using identity collate)
 
         Returns:
             Dictionary containing loss and metrics
         """
+        # Handle both tensor and dictionary inputs
+        if isinstance(batch, dict):
+            images = batch['images']
+            positive_pairs = batch.get('positive_pairs', None)
+            has_pairs = batch.get('has_pairs', None)
+        else:
+            images = batch
+            positive_pairs = None
+            has_pairs = None
+
         # split into list of single-image tensors
-        images_list = batch.split(1)
+        images_list = images.split(1)
 
         data_dict = {self.model.vae.images_read_key: images_list}
 
@@ -319,10 +349,13 @@ class FlexTokTrainer:
         loss_std = torch.stack(losses).std() if len(losses) > 1 else torch.tensor(0.0)
 
         # Compute REPA loss
-        repa_loss = self.compute_repa_loss(data_dict, batch)
+        repa_loss = self.compute_repa_loss(data_dict, images)
+
+        # Compute ArcFace loss
+        arcface_loss = self.compute_arcface_loss(data_dict, images, positive_pairs)
 
         # Combined loss
-        loss = flow_loss + self.repa_weight * repa_loss
+        loss = flow_loss + self.repa_weight * repa_loss + self.arcface_weight * arcface_loss
 
         # Additional metrics for debugging
         with torch.no_grad():
@@ -343,6 +376,7 @@ class FlexTokTrainer:
             'loss': loss,
             'flow_loss': flow_loss,
             'repa_loss': repa_loss,
+            'arcface_loss': arcface_loss,
             'loss_std': loss_std,
             'pred_mean': pred_mean,
             'pred_std': pred_std,
@@ -396,6 +430,49 @@ class FlexTokTrainer:
         repa_loss = self.repa_module(repa_data_dict)
 
         return repa_loss
+
+    def compute_arcface_loss(
+        self,
+        data_dict: Dict[str, torch.Tensor],
+        original_images: torch.Tensor,
+        positive_pairs: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Compute ArcFace identity preservation loss.
+
+        Args:
+            data_dict: Dictionary containing data after forward pass
+            original_images: Original input images (B, 3, H, W)
+            positive_pairs: Optional same-identity pair images (B, 3, H, W)
+
+        Returns:
+            ArcFace loss scalar
+        """
+        if not hasattr(self, 'arcface_module') or not self.use_arcface:
+            return torch.tensor(0.0, device=original_images.device)
+
+        # Get reconstructed images from VAE
+        # We need to decode the predicted latents to get reconstructed images
+        pred_latents_list = data_dict['vae_latents_reconst']
+
+        # Decode predicted latents to get reconstructed images
+        decode_dict = {
+            self.model.vae.vae_latents_read_key: pred_latents_list
+        }
+        decode_dict = self.model.vae.decode(decode_dict)
+        reconstructed_images_list = decode_dict[self.model.vae.images_reconst_write_key]
+
+        # Stack list of tensors into batch
+        reconstructed_images = torch.cat(reconstructed_images_list, dim=0)
+
+        # Compute ArcFace loss
+        arcface_loss = self.arcface_module(
+            original_images=original_images,
+            reconstructed_images=reconstructed_images,
+            positive_pairs=positive_pairs,
+        )
+
+        return arcface_loss
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Train for one epoch."""
@@ -454,6 +531,7 @@ class FlexTokTrainer:
                         'train/loss': metrics['loss'].item(),
                         'train/flow_loss': metrics['flow_loss'].item(),
                         'train/repa_loss': metrics['repa_loss'].item() if isinstance(metrics['repa_loss'], torch.Tensor) else metrics['repa_loss'],
+                        'train/arcface_loss': metrics['arcface_loss'].item() if isinstance(metrics['arcface_loss'], torch.Tensor) else metrics['arcface_loss'],
                         'train/loss_std': metrics['loss_std'].item(),
                         'train/lr': current_lr,
                         'train/epoch': epoch,
@@ -468,7 +546,7 @@ class FlexTokTrainer:
                     if self.use_wandb:
                         wandb.log(log_dict, step=self.global_step)
 
-                    # Update progress bar with both flow and REPA loss if available
+                    # Update progress bar with flow, REPA, and ArcFace loss if available
                     postfix_dict = {
                         'loss': f"{metrics['loss'].item():.4f}",
                         'flow': f"{metrics['flow_loss'].item():.4f}",
@@ -476,12 +554,18 @@ class FlexTokTrainer:
                     }
                     if self.use_repa and isinstance(metrics['repa_loss'], torch.Tensor):
                         postfix_dict['repa'] = f"{metrics['repa_loss'].item():.4f}"
+                    if self.use_arcface and isinstance(metrics['arcface_loss'], torch.Tensor):
+                        postfix_dict['arc'] = f"{metrics['arcface_loss'].item():.4f}"
 
                     pbar.set_postfix(postfix_dict)
 
                 # Visualization
                 if self.global_step % self.vis_every == 0 and self.use_wandb:
-                    vis_batch = batch[:4].clone().detach()
+                    # Extract images from batch (handle both tensor and dict formats)
+                    if isinstance(batch, dict):
+                        vis_batch = batch['images'][:4].clone().detach()
+                    else:
+                        vis_batch = batch[:4].clone().detach()
                     self.visualize_reconstructions(vis_batch)
 
                 epoch_losses.append(metrics['loss'].item())
@@ -698,6 +782,15 @@ class FlexTokTrainer:
         if self.use_repa and hasattr(self, 'repa_module'):
             checkpoint['repa_module_state_dict'] = self.repa_module.state_dict()
 
+        # ArcFace module is frozen, so we don't need to save its weights
+        # But we save the config for reconstruction
+        if self.use_arcface and hasattr(self, 'arcface_module'):
+            checkpoint['arcface_config'] = {
+                'model_name': self.config.get('arcface_model_name', 'buffalo_l'),
+                'root': self.config.get('arcface_root', '~/.insightface'),
+                'embedding_size': self.config.get('arcface_embedding_size', 512),
+            }
+
         # Save latest checkpoint
         checkpoint_path = self.checkpoint_dir / 'checkpoint_latest.pt'
         torch.save(checkpoint, checkpoint_path)
@@ -747,6 +840,10 @@ class FlexTokTrainer:
         if self.use_repa and hasattr(self, 'repa_module') and checkpoint.get('repa_module_state_dict'):
             self.repa_module.load_state_dict(checkpoint['repa_module_state_dict'])
             print("Loaded REPA module state from checkpoint")
+
+        # ArcFace module is frozen pretrained, no state to load
+        if self.use_arcface and checkpoint.get('arcface_config'):
+            print("ArcFace module configuration found in checkpoint (using pretrained weights)")
 
         self.current_epoch = checkpoint['epoch']
         self.global_step = checkpoint['global_step']
@@ -1027,6 +1124,9 @@ def main(cfg: DictConfig):
         train_transforms = transforms.RandomHorizontalFlip(p=0.5)
 
     dataset_name = config.get('dataset_name', 'celebahq')
+    use_arcface = config.get('use_arcface', False)
+    use_identity_collate = config.get('arcface_use_pairs', False)
+
     train_loader = create_celeb_dataloader(
         dataset_type=dataset_name,
         root_dir=config['data_path'],
@@ -1035,6 +1135,8 @@ def main(cfg: DictConfig):
         split='train',
         num_workers=config.get('num_workers', 4),
         transform=train_transforms,
+        return_identity=use_arcface,
+        use_identity_collate=use_identity_collate,
     )
 
     val_loader = create_celeb_dataloader(
@@ -1045,6 +1147,8 @@ def main(cfg: DictConfig):
         split='val',
         num_workers=config.get('num_workers', 4),
         shuffle=False,
+        return_identity=use_arcface,
+        use_identity_collate=use_identity_collate,
     )
 
     print(f"Train batches: {len(train_loader)}")

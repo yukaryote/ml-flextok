@@ -64,7 +64,7 @@ class TwentyQuestionsGame:
         self.tokens_list = zhat_to_tokens(self.flextok_model, all_zhats).unsqueeze(-1)
 
         # DEBUG: change last one to [[1]] instead of [[2]]
-        #self.tokens_list[-1] = torch.tensor([[1]], device=self.tokens_list[-1].device)
+        self.tokens_list[-1] = torch.tensor([[1]], device=self.tokens_list[-1].device)
         self.tokens_list = list(self.tokens_list.split(1))
         print("Possible tokens prepared.", self.tokens_list)
         self.game_initialized = True

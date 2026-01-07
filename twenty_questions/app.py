@@ -47,7 +47,7 @@ class GameState:
         self.current_question = 0
         self.max_questions = 20
         self.num_samples_per_quantization = 1
-        self.num_options = 4  # Number of options per question (n-ary choice)
+        self.num_options = 8  # Number of options per question (n-ary choice)
         self.enable_bf16 = detect_bf16_support()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.current_images_dict: Dict[int, torch.Tensor] = {}
@@ -63,7 +63,7 @@ class GameState:
         self.flextok_model = load_flextok_model(
             model_name='EPFL-VILAB/flextok_d18_d18_in1k',
             bf16=self.enable_bf16,
-            ckpt_path="/home/iyu/ml-flextok/checkpoints/celeba_d18_fsq_4/20251202/checkpoint_best.pt",
+            ckpt_path="/home/iyu/ml-flextok/checkpoints/synth_d18_fsq_8/20251215/checkpoint_best.pt",
             fsq_level=[fsq_level]
         )
 

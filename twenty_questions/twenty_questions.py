@@ -152,8 +152,8 @@ def zhat_to_tokens(flextok_model: FlexTok, zhats: torch.Tensor):
 
 
 def sample_images_per_quantization(
-        flextok_model: FlexTok, 
-        possible_tokens_list: list[torch.Tensor], 
+        flextok_model: FlexTok,
+        possible_tokens_list: list[torch.Tensor],
         num_samples_per_quantization: int,
         condition_tokens: list[torch.Tensor] = [],
         bf16: bool = True
@@ -170,32 +170,59 @@ def sample_images_per_quantization(
         images: dict with keys as elements of tokens_list and elements are tensors of shape (num_samples_per_quantization, C, H, W)
     """
     imgs_per_quantization = {}
-    for i in tqdm.tqdm(range(0, len(possible_tokens_list))):
-        print("tokens list", possible_tokens_list)
-        batch_tokens_list = possible_tokens_list[i:i+1]  # list with one (1, 1)-shape tensor
-        print("batch_tokens_list", batch_tokens_list)
-        print('condition_tokens', condition_tokens)
+
+    # Prepare all condition token sequences
+    all_final_tokens = []
+    token_keys = []
+    for i in range(len(possible_tokens_list)):
+        batch_tokens_list = possible_tokens_list[i:i+1]
         final_condition_tokens = condition_tokens + batch_tokens_list
-        print("final_condition_tokens", final_condition_tokens)
-        reconstructions = []
-        for _ in range(num_samples_per_quantization):
-            with get_bf16_context(bf16):
-                with torch.no_grad():
-                    reconst = flextok_model.detokenize(
-                        final_condition_tokens,
-                        timesteps=25, # Number of denoising steps
-                        guidance_scale=7.5, # Classifier-free guidance scale
-                        perform_norm_guidance=True, # APG, see https://arxiv.org/abs/2410.02416
-                        # Optionally control initial noise. Note that while the initial noise is deterministic, the rest of the model isn't.
-                        generator=None,
-                        verbose=False, # Enable to show denoising progress bar with tqdm
-                    )
-                    reconstructions.append(reconst.cpu())
-        imgs_per_quantization[possible_tokens_list[i].item()] = torch.stack(reconstructions, dim=0)
+        all_final_tokens.append(final_condition_tokens)
+        token_keys.append(possible_tokens_list[i].item())
+
+    print(f"Generating {len(all_final_tokens)} images in parallel (batch mode)...")
+
+    with get_bf16_context(bf16):
+        with torch.no_grad():
+            # Flatten all sequences into a single list for batched detokenization
+            # Each sequence needs to be converted to the proper format
+            batched_token_sequences = []
+            for final_tokens in all_final_tokens:
+                # Concatenate condition tokens with each new token
+                token_seq = torch.cat(final_tokens, dim=-1)  # (1, seq_len)
+                batched_token_sequences.append(token_seq)
+
+            # Generate all images in one batched call
+            all_reconstructions_flat = []
+            for _ in range(num_samples_per_quantization):
+                reconst_batch = flextok_model.detokenize(
+                    batched_token_sequences,
+                    timesteps=25,
+                    guidance_scale=7.5,
+                    perform_norm_guidance=True,
+                    generator=None,
+                    verbose=False,
+                )
+                all_reconstructions_flat.append(reconst_batch.cpu())
+
+            # Stack samples and reshape
+            # all_reconstructions_flat is list of (N_options, C, H, W) tensors
+            all_reconstructions = torch.stack(all_reconstructions_flat, dim=0)  # (num_samples, N_options, C, H, W)
+            all_reconstructions = all_reconstructions.permute(1, 0, 2, 3, 4)  # (N_options, num_samples, C, H, W)
+
+    # Map results back to dictionary
+    for idx, token_key in enumerate(token_keys):
+        imgs_per_quantization[token_key] = all_reconstructions[idx]
+
     return imgs_per_quantization
 
 
 def convert_images_to_pil(images: torch.Tensor) -> list[Image.Image]:
+    # Handle single image (C, H, W) vs batch (N, C, H, W)
+    if images.ndim == 3:
+        # Single image: add batch dimension
+        images = images.unsqueeze(0)
+
     images_denorm = denormalize(images).clamp(0, 1)
     images_pil_list = []
     for img in images_denorm:
