@@ -28,6 +28,8 @@ use_attention_mask: false
 
 gradient_checkpointing: true  # Enable gradient checkpointing to save memory (disable when changing fsq_levels)
 
+size_sampling_mode: "uniform"  # Options: "uniform", "exponential", "pow2"
+
 # ============================================================================
 # Data Configuration
 # ============================================================================
@@ -49,7 +51,7 @@ use_augmentation: true  # Enables RandomHorizontalFlip
 # ============================================================================
 
 # Number of training epochs
-num_epochs: 50
+num_epochs: 200
 
 # Batch sizes
 batch_size: 16
@@ -187,7 +189,7 @@ repa_lr: 1.0e-4
 use_arcface: false
 
 # Weight for ArcFace loss (recommend 0.1-1.0 for identity preservation)
-arcface_weight: 0.5
+arcface_weight: 1.0
 
 # Pretrained ArcFace model name from InsightFace
 # Options: 'buffalo_l', 'buffalo_s', 'antelopev2'
@@ -204,4 +206,4 @@ arcface_embedding_size: 512
 # Whether to use positive pairs sampling for contrastive learning
 # If true, dataloader will sample same-identity pairs within batch
 # If false, only compares original vs reconstructed for each image
-arcface_use_pairs: false
+arcface_use_pairs: true

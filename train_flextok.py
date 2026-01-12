@@ -315,8 +315,8 @@ class FlexTokTrainer:
         """
         # Handle both tensor and dictionary inputs
         if isinstance(batch, dict):
-            images = batch['images']
-            positive_pairs = batch.get('positive_pairs', None)
+            images = batch['images'].to(self.device)
+            positive_pairs = batch.get('positive_pairs', None).to(self.device) if batch.get('positive_pairs', None) is not None else None
             has_pairs = batch.get('has_pairs', None)
         else:
             images = batch
@@ -484,8 +484,6 @@ class FlexTokTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.get('num_epochs', 50)}")
 
         for batch_idx, batch in enumerate(pbar):
-            batch = batch.to(self.device)
-
             # Forward pass with mixed precision
             if self.use_amp and self.scaler is not None:
                 with torch.amp.autocast("cuda"):
@@ -595,8 +593,6 @@ class FlexTokTrainer:
         for batch_idx, batch in enumerate(tqdm(self.val_loader, desc="Validating")):
             if max_val_batches and batch_idx >= max_val_batches:
                 break
-
-            batch = batch.to(self.device)
 
             if self.use_amp and self.device.type == 'cuda':
                 with torch.amp.autocast("cuda"):
@@ -798,15 +794,6 @@ class FlexTokTrainer:
         # artifact.add_file(checkpoint_path)
         # wandb.log_artifact(artifact)
         print(f"Saved checkpoint to {checkpoint_path}")
-
-        # Save epoch checkpoint (DON'T DO RN TO SAVE SPACE)
-        # if epoch % self.save_every == 0:
-        #     epoch_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pt'
-        #     torch.save(checkpoint, epoch_path)
-        #     # artifact = wandb.Artifact(f'epoch_{epoch:04d}', type='model')
-        #     # artifact.add_file(epoch_path)
-        #     # wandb.log_artifact(artifact)
-        #     print(f"Saved epoch checkpoint to {epoch_path}")
 
         # Save best checkpoint
         if is_best:
@@ -1096,6 +1083,7 @@ def main(cfg: DictConfig):
             raise ValueError("Model does not have 'dec_seq_packer' module to replace")
         new_dropout = AttentionMaskedNestedDropout(
             read_write_key=old_dropout.read_write_key,
+            size_sampling_mode=config.get('size_sampling_mode', 'uniform'),
         )
         new_masking = NestedDropoutSequencePacker(
             input_list_read_keys=old_seq_packer.input_list_read_keys,
@@ -1114,6 +1102,16 @@ def main(cfg: DictConfig):
         model.decoder.module_dict['dec_nested_dropout'] = new_dropout
         model.decoder.module_dict['dec_seq_packer'] = new_masking
         print("  Replaced nested dropout and sequence packer modules in decoder")
+    else:
+        # When using the original MaskedNestedDropout, update its size_sampling_mode
+        if config.get('size_sampling_mode', None) is not None:
+            from flextok.model.preprocessors.token_dropout import MaskedNestedDropout
+            dropout_module: MaskedNestedDropout = model.decoder.module_dict['dec_nested_dropout']
+            if dropout_module is not None:
+                old_mode = dropout_module.size_sampling_mode
+                new_mode = config.get('size_sampling_mode', 'uniform')
+                dropout_module.size_sampling_mode = new_mode
+                print(f"\nUpdated nested dropout size_sampling_mode: {old_mode} -> {new_mode}")
 
     # Create dataloaders
     print("\nCreating dataloaders...")

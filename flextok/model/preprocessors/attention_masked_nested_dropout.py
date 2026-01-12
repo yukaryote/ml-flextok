@@ -168,6 +168,8 @@ class AttentionMaskedNestedDropout(nn.Module):
     def sample_keep_k(self, N):
         if self.size_sampling_mode == "uniform":
             keep_k = np.random.randint(low=1, high=N + 1)
+        elif self.size_sampling_mode == "exponential":
+            keep_k = np.random.exponential(scale=0.05)
         elif self.size_sampling_mode == "pow2":
             assert is_power_of_two(N)
             keep_k = np.random.choice(powers_of_two(1, N))

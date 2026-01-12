@@ -57,6 +57,9 @@ class MaskedNestedDropout(nn.Module):
         elif self.size_sampling_mode == "uniform_pow2":
             k = np.random.randint(low=1, high=N + 1)
             keep_k = k if is_power_of_two(k) else 1 << k.bit_length()
+        elif self.size_sampling_mode == "exponential":
+            k = np.clip(np.random.exponential(scale=0.5), 1, N)
+            keep_k = int(round(k))
         else:
             raise ValueError(f"size_sampling_mode {self.size_sampling_mode} is not defined.")
         return keep_k

@@ -197,7 +197,7 @@ class _BaseCelebADataset(Dataset):
             f")"
         )
     
-    def __getitem__(self, idx: int) -> torch.Tensor | Tuple[torch.Tensor, str]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """
         Load and preprocess an image.
 

@@ -52,47 +52,72 @@ class ArcFaceModule(nn.Module):
 
         self.eval()
 
-    def _load_recognition_model(self) -> nn.Module:
+    def _load_recognition_model(self):
         """
         Load pretrained ArcFace recognition model from InsightFace.
 
         Returns:
             Loaded recognition model (frozen)
         """
-        try:
-            # Add insightface to path if needed
-            insightface_path = Path(__file__).parent.parent.parent.parent.parent / 'insightface' / 'python-package'
-            if insightface_path.exists() and str(insightface_path) not in sys.path:
-                sys.path.insert(0, str(insightface_path))
+        # Add insightface to path if needed
+        insightface_path = Path(__file__).parent.parent.parent.parent.parent / 'insightface' / 'python-package'
+        if insightface_path.exists() and str(insightface_path) not in sys.path:
+            sys.path.insert(0, str(insightface_path))
 
-            from insightface.app import FaceAnalysis
+        # Import only the necessary components (avoid full FaceAnalysis with dependencies)
+        from insightface.model_zoo import model_zoo
+        import onnxruntime
 
-            # Initialize FaceAnalysis with only recognition module
-            app = FaceAnalysis(
-                name=self.model_name,
-                root=self.root,
-                allowed_modules=['recognition']
+        # Find the recognition model file
+        model_dir = Path(self.root) / 'models' / self.model_name
+
+        if not model_dir.exists():
+            raise FileNotFoundError(
+                f"Model directory not found: {model_dir}\n"
+                f"Please download the model first using:\n"
+                f"  from insightface.app import FaceAnalysis\n"
+                f"  app = FaceAnalysis(name='{self.model_name}', root='{self.root}')"
             )
-            app.prepare(ctx_id=0 if torch.cuda.is_available() else -1)
 
-            # Extract the recognition model
-            if 'recognition' not in app.models:
-                raise ValueError(f"Recognition model not found in {self.model_name}")
+        # Find recognition model ONNX file (usually named *_arcface*.onnx or w600k_r50.onnx)
+        onnx_files = list(model_dir.glob('*.onnx'))
+        recognition_onnx = None
 
-            recognition_model = app.models['recognition']
+        # Try to find recognition model by common naming patterns
+        for onnx_file in onnx_files:
+            filename = onnx_file.name.lower()
+            # Look for ArcFace/recognition models (exclude detection models)
+            if any(pattern in filename for pattern in ['arcface', 'w600k', 'r50', 'r100', 'r18']) and \
+                not any(pattern in filename for pattern in ['det', 'scrfd', 'retinaface']):
+                recognition_onnx = onnx_file
+                break
 
-            print(f"Loaded ArcFace recognition model: {self.model_name}")
-            print(f"  Input size: {recognition_model.input_size}")
-            print(f"  Embedding size: {recognition_model.output_shape}")
+        if recognition_onnx is None and len(onnx_files) > 0:
+            # Fallback: try loading each file and check if it's a recognition model
+            for onnx_file in onnx_files:
+                try:
+                    model = model_zoo.get_model(str(onnx_file))
+                    if hasattr(model, 'taskname') and model.taskname == 'recognition':
+                        recognition_onnx = onnx_file
+                        break
+                except:
+                    continue
 
-            return recognition_model
-
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load ArcFace model '{self.model_name}' from {self.root}. "
-                f"Error: {e}\n"
-                f"Please ensure insightface is installed and models are downloaded."
+        if recognition_onnx is None:
+            raise ValueError(
+                f"No recognition model found in {model_dir}\n"
+                f"Available ONNX files: {[f.name for f in onnx_files]}"
             )
+
+        # Load the recognition model
+        recognition_model = model_zoo.get_model(str(recognition_onnx))
+
+        print(f"Loaded ArcFace recognition model: {self.model_name}")
+        print(f"  Model file: {recognition_onnx.name}")
+        print(f"  Input size: {recognition_model.input_size}")
+        print(f"  Embedding size: {recognition_model.output_shape}")
+
+        return recognition_model
 
     def preprocess_images(self, images: torch.Tensor) -> np.ndarray:
         """
