@@ -30,15 +30,18 @@ gradient_checkpointing: true  # Enable gradient checkpointing to save memory (di
 
 size_sampling_mode: "uniform"  # Options: "uniform", "exponential", "pow2"
 
+mask_input_registers: false  # Whether to mask input registers during training
+
 # ============================================================================
 # Data Configuration
 # ============================================================================
 
 # Path to dataset
-# Expected structure: data_path/{00000.jpg, 00001.jpg, ...}
+# For CelebA/CelebA-HQ: data_path/{00000.jpg, 00001.jpg, ...}
 # or data_path/images/{00000.jpg, 00001.jpg, ...}
-dataset_name: "celeba"
-data_path: "./data/${dataset_name}"
+# For ImageNet: data_path/train/{class_id}/*.JPEG and data_path/val/*.JPEG
+dataset_name: "imagenet"  # Options: "celeba", "celebahq", "synth_faces", "imagenet"
+data_path: "./data/ILSVRC/Data/CLS-LOC"
 
 # Image size (256, 512, or 1024 depending on your dataset)
 img_size: 256

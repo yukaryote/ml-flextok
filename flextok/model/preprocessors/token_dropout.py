@@ -58,7 +58,7 @@ class MaskedNestedDropout(nn.Module):
             k = np.random.randint(low=1, high=N + 1)
             keep_k = k if is_power_of_two(k) else 1 << k.bit_length()
         elif self.size_sampling_mode == "exponential":
-            k = np.clip(np.random.exponential(scale=0.5), 1, N)
+            k = np.clip(np.random.exponential(scale=0.1), 1, N)
             keep_k = int(round(k))
         else:
             raise ValueError(f"size_sampling_mode {self.size_sampling_mode} is not defined.")
@@ -74,14 +74,25 @@ class MaskedNestedDropout(nn.Module):
 
             for i in range(len(data_dict[self.read_write_key])):
                 keep_k = data_dict[self.eval_keep_k_read_key][i]
-                data_dict[self.read_write_key][i][:, keep_k:] = self.dropout_mask_token
+                tokens = data_dict[self.read_write_key][i]
+                if keep_k < tokens.shape[1]:
+                    masked = tokens.clone()
+                    masked[:, keep_k:] = self.dropout_mask_token
+                    data_dict[self.read_write_key][i] = masked
         else:
             keep_ks = []
             for i in range(len(data_dict[self.read_write_key])):
                 N = data_dict[self.read_write_key][i].shape[1]
-                keep_k = self.sample_keep_k(N)
+                if self.train_keep_k_write_key not in data_dict:
+                    keep_k = self.sample_keep_k(N)
+                else:
+                    keep_k = data_dict[self.train_keep_k_write_key][i]
                 keep_ks.append(keep_k)
-                data_dict[self.read_write_key][i][:, keep_k:] = self.dropout_mask_token
+                tokens = data_dict[self.read_write_key][i]
+                if keep_k < tokens.shape[1]:
+                    masked = tokens.clone()
+                    masked[:, keep_k:] = self.dropout_mask_token
+                    data_dict[self.read_write_key][i] = masked
             data_dict[self.train_keep_k_write_key] = keep_ks
 
         return data_dict

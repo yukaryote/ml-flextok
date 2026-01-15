@@ -1,9 +1,9 @@
 # For licensing see accompanying LICENSE file.
 # Copyright (C) 2025 Apple Inc. and EPFL. All Rights Reserved.
 """
-CelebA and CelebA-HQ Dataset Loaders for FlexTok Fine-tuning
+CelebA, CelebA-HQ, and ImageNet Dataset Loaders for FlexTok Fine-tuning
 
-This module provides PyTorch Dataset classes for loading CelebA and CelebA-HQ images
+This module provides PyTorch Dataset classes for loading CelebA, CelebA-HQ, and ImageNet images
 with preprocessing suitable for FlexTok training.
 """
 
@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 
-__all__ = ["CelebADataset", "CelebAHQDataset", "create_celeb_dataloader", "identity_aware_collate_fn"]
+__all__ = ["CelebADataset", "CelebAHQDataset", "ImageNetDataset", "create_celeb_dataloader", "create_imagenet_dataloader", "identity_aware_collate_fn"]
 
 
 class _BaseCelebADataset(Dataset):
@@ -428,6 +428,207 @@ class SyntheticFaceDataset(_BaseCelebADataset):
         super().__init__(root_dir, img_size, split, transform, return_path, extensions, return_identity)
 
 
+class ImageNetDataset(Dataset):
+    """
+    ImageNet (ILSVRC) Dataset for FlexTok training.
+
+    This dataset loads ImageNet images from the standard ILSVRC directory structure:
+    root_dir/train/{class_id}/{image}.JPEG (train split with class subdirectories)
+    root_dir/val/{image}.JPEG (validation split, flat structure)
+    root_dir/test/{image}.JPEG (test split, flat structure)
+
+    Images are preprocessed to be compatible with FlexTok's expected input format
+    (normalized to [-1, 1]).
+
+    Args:
+        root_dir (str): Root directory containing ImageNet data (e.g., data/ILSVRC/Data/CLS-LOC).
+        img_size (int): Target image size for resizing. Default: 256.
+        split (str): Dataset split. One of "train", "val", or "test". Default: "train".
+        transform (Optional[Callable]): Additional transforms to apply after
+            default preprocessing. Default: None.
+        return_path (bool): If True, return (image, path) tuples instead of
+            just images. Useful for debugging. Default: False.
+
+    Returns:
+        torch.Tensor: Image tensor of shape (3, img_size, img_size) normalized
+            to [-1, 1] range, or (image, path) tuple if return_path=True.
+
+    Examples:
+        >>> # Basic usage
+        >>> dataset = ImageNetDataset(root_dir="data/ILSVRC/Data/CLS-LOC", img_size=256)
+        >>> img = dataset[0]  # Returns tensor of shape (3, 256, 256)
+
+        >>> # With validation split
+        >>> val_dataset = ImageNetDataset(
+        ...     root_dir="data/ILSVRC/Data/CLS-LOC",
+        ...     img_size=256,
+        ...     split="val"
+        ... )
+
+        >>> # With custom transforms
+        >>> from torchvision import transforms
+        >>> train_transform = transforms.Compose([
+        ...     transforms.RandomHorizontalFlip(p=0.5),
+        ...     transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        ... ])
+        >>> dataset = ImageNetDataset(
+        ...     root_dir="data/ILSVRC/Data/CLS-LOC",
+        ...     img_size=256,
+        ...     transform=train_transform
+        ... )
+    """
+
+    def __init__(
+        self,
+        root_dir: str,
+        img_size: int = 256,
+        split: str = "train",
+        transform: Optional[Callable] = None,
+        return_path: bool = False,
+    ):
+        self.root_dir = Path(root_dir)
+        self.img_size = img_size
+        self.split = split
+        self.custom_transform = transform
+        self.return_path = return_path
+
+        # Validate split
+        if split not in ["train", "val", "test"]:
+            raise ValueError(f"Invalid split '{split}'. Must be one of ['train', 'val', 'test']")
+
+        # Find all image files
+        self.image_paths = self._find_images()
+
+        if len(self.image_paths) == 0:
+            raise ValueError(
+                f"No images found in {self.root_dir / split}. "
+                f"Please check the directory structure."
+            )
+
+        # Define preprocessing transforms
+        # FlexTok expects images normalized to [-1, 1] using mean=0.5, std=0.5
+        self.base_transform = self._create_base_transform()
+
+    def _find_images(self) -> List[Path]:
+        """
+        Find all image files in the ImageNet directory.
+
+        For train: searches in root_dir/train/{class_id}/*.JPEG
+        For val/test: searches in root_dir/{split}/*.JPEG (flat structure)
+        """
+        split_dir = self.root_dir / self.split
+        image_paths = []
+
+        if self.split == "train":
+            # Train has class subdirectories
+            class_dirs = sorted([d for d in split_dir.iterdir() if d.is_dir()])
+            for class_dir in class_dirs:
+                # Find all JPEG images in this class directory
+                image_paths.extend(class_dir.glob("*.JPEG"))
+                image_paths.extend(class_dir.glob("*.jpeg"))
+                image_paths.extend(class_dir.glob("*.jpg"))
+                image_paths.extend(class_dir.glob("*.JPG"))
+        else:
+            # Val and test have flat structure with images directly in the directory
+            image_paths.extend(split_dir.glob("*.JPEG"))
+            image_paths.extend(split_dir.glob("*.jpeg"))
+            image_paths.extend(split_dir.glob("*.jpg"))
+            image_paths.extend(split_dir.glob("*.JPG"))
+
+        # Sort paths for reproducibility
+        image_paths = sorted(image_paths)
+
+        return image_paths
+
+    def _create_base_transform(self) -> transforms.Compose:
+        """
+        Create base transform pipeline for ImageNet preprocessing.
+
+        For ImageNet, we use:
+        1. Resize shorter side to img_size
+        2. Center crop to img_size x img_size
+        3. Convert to tensor [0, 1]
+        4. Normalize to [-1, 1]
+
+        Returns:
+            Composed transform pipeline that normalizes to [-1, 1].
+        """
+        transform_list = [
+            transforms.Resize(self.img_size, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(self.img_size),
+            transforms.ToTensor(),  # Converts to [0, 1]
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # To [-1, 1]
+        ]
+
+        return transforms.Compose(transform_list)
+
+    def _apply_transforms(self, img: Image.Image) -> torch.Tensor:
+        """Apply base and custom transforms to an image."""
+        img = self.base_transform(img)
+        if self.custom_transform is not None:
+            img = self.custom_transform(img)
+        return img
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        """
+        Load and preprocess an ImageNet image.
+
+        Args:
+            idx: Index of the image to load.
+
+        Returns:
+            Image tensor of shape (3, img_size, img_size) normalized to [-1, 1],
+            or (image, path) tuple if return_path=True.
+        """
+        img_path = self.image_paths[idx]
+
+        # Load image with retry logic for corrupted files
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                img = Image.open(img_path).convert("RGB")
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    # Last attempt failed - try loading a different image
+                    warnings.warn(
+                        f"Failed to load image {img_path} after {max_retries} attempts: {e}. "
+                        f"Skipping to next image."
+                    )
+                    # Return a random other image from the dataset
+                    new_idx = (idx + 1) % len(self.image_paths)
+                    if new_idx == idx:
+                        # Only one image in dataset, create a blank image
+                        img = Image.new('RGB', (self.img_size, self.img_size), color=(128, 128, 128))
+                    else:
+                        return self.__getitem__(new_idx)
+                else:
+                    # Retry after a short delay
+                    import time
+                    time.sleep(0.1)
+
+        # Apply transforms
+        img = self._apply_transforms(img)
+
+        # Return based on flags
+        if self.return_path:
+            return img, str(img_path)
+        return img
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"root_dir={self.root_dir}, "
+            f"img_size={self.img_size}, "
+            f"split={self.split}, "
+            f"num_images={len(self)}"
+            f")"
+        )
+
+
 def identity_aware_collate_fn(batch: List[Tuple[torch.Tensor, str]]) -> Dict[str, torch.Tensor]:
     """
     Custom collate function that creates positive pairs for identity-based learning.
@@ -602,6 +803,92 @@ def create_celeb_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=collate_fn,
+        **kwargs
+    )
+
+    return dataloader
+
+
+def create_imagenet_dataloader(
+    root_dir: str,
+    img_size: int = 256,
+    batch_size: int = 32,
+    split: str = "train",
+    shuffle: bool = None,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    transform: Optional[Callable] = None,
+    **kwargs
+) -> DataLoader:
+    """
+    Create a DataLoader for ImageNet dataset.
+
+    Convenience function to create a DataLoader with sensible defaults
+    for FlexTok training on ImageNet.
+
+    Args:
+        root_dir (str): Root directory containing ImageNet data (e.g., data/ILSVRC/Data/CLS-LOC).
+        img_size (int): Target image size. Default: 256.
+        batch_size (int): Batch size. Default: 32.
+        split (str): Dataset split ("train", "val", or "test"). Default: "train".
+        shuffle (bool): Whether to shuffle the data. If None, defaults to True
+            for train split and False for val/test splits.
+        num_workers (int): Number of worker processes for data loading. Default: 4.
+        pin_memory (bool): Whether to pin memory for faster GPU transfer. Default: True.
+        transform (Optional[Callable]): Additional transforms to apply. Default: None.
+        **kwargs: Additional arguments to pass to DataLoader.
+
+    Returns:
+        DataLoader: Configured DataLoader for ImageNet.
+
+    Examples:
+        >>> # Basic usage
+        >>> train_loader = create_imagenet_dataloader(
+        ...     root_dir="data/ILSVRC/Data/CLS-LOC",
+        ...     batch_size=32,
+        ...     img_size=256
+        ... )
+        >>> for batch in train_loader:
+        ...     # batch shape: (32, 3, 256, 256)
+        ...     pass
+
+        >>> # Validation loader
+        >>> val_loader = create_imagenet_dataloader(
+        ...     root_dir="data/ILSVRC/Data/CLS-LOC",
+        ...     batch_size=64,
+        ...     split="val",
+        ...     shuffle=False
+        ... )
+
+        >>> # With data augmentation
+        >>> from torchvision import transforms
+        >>> train_transform = transforms.Compose([
+        ...     transforms.RandomHorizontalFlip(p=0.5),
+        ...     transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        ... ])
+        >>> train_loader = create_imagenet_dataloader(
+        ...     root_dir="data/ILSVRC/Data/CLS-LOC",
+        ...     transform=train_transform,
+        ...     batch_size=32
+        ... )
+    """
+    # Default shuffle behavior: True for train, False for val/test
+    if shuffle is None:
+        shuffle = (split == "train")
+
+    dataset = ImageNetDataset(
+        root_dir=root_dir,
+        img_size=img_size,
+        split=split,
+        transform=transform,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         **kwargs
     )
 

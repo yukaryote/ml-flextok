@@ -29,7 +29,7 @@ from torch.utils.checkpoint import checkpoint
 
 # Import FlexTok components
 from flextok import FlexTokFromHub, model
-from flextok.utils.dataloader import create_celeb_dataloader
+from flextok.utils.dataloader import create_celeb_dataloader, create_imagenet_dataloader
 from flextok.utils.demo import denormalize, batch_to_pil
 from flextok.regularizers.quantize_fsq import FSQ
 from flextok.model.postprocessors.heads import LinearHead
@@ -319,7 +319,7 @@ class FlexTokTrainer:
             positive_pairs = batch.get('positive_pairs', None).to(self.device) if batch.get('positive_pairs', None) is not None else None
             has_pairs = batch.get('has_pairs', None)
         else:
-            images = batch
+            images = batch.to(self.device)
             positive_pairs = None
             has_pairs = None
 
@@ -928,6 +928,42 @@ def main(cfg: DictConfig):
     # Handle gradient checkpointing configuration
     gradient_checkpointing = config.get('gradient_checkpointing', True)
 
+    if config.get("mask_input_registers", False):
+        # Enable masking of input register tokens during training
+        print("\nEnabling masking of input register tokens during training...")
+        if hasattr(model.encoder, 'module_dict') and 'enc_transformer' in model.encoder.module_dict:
+            # Insert the masking module right after the register module so it sees embeddings.
+            from flextok.model.preprocessors.registers import Registers1D
+            from flextok.model.preprocessors.token_dropout import MaskedNestedDropout
+            registers: Registers1D = model.encoder.module_dict['enc_register_module']
+            # Propagate keep_k to the decoder later.
+            enc_dropout = MaskedNestedDropout(
+                read_write_key=registers.registers_write_key,
+                dim=registers.registers.size(-1),
+                size_sampling_mode=config.get('size_sampling_mode', 'uniform'),
+                train_keep_k_write_key='train_keep_k',
+            )
+            # Insert into module_dict after enc_register_module to avoid later key overrides.
+            if 'enc_registers_masking' in model.encoder.module_dict:
+                del model.encoder.module_dict['enc_registers_masking']
+            new_module_dict = {}
+            for module_name, module in model.encoder.module_dict.items():
+                new_module_dict[module_name] = module
+                if module_name == 'enc_register_module':
+                    new_module_dict['enc_registers_masking'] = enc_dropout
+            model.encoder.module_dict = nn.ModuleDict(new_module_dict)
+
+            # modify decoder's MaskedNestedDropout to use the same k_keep
+            if hasattr(model.decoder, 'module_dict') and 'dec_nested_dropout' in model.decoder.module_dict:
+                dec_dropout: MaskedNestedDropout = model.decoder.module_dict['dec_nested_dropout']
+                dec_dropout_new = MaskedNestedDropout(
+                    read_write_key=dec_dropout.read_write_key,
+                    dim=dec_dropout.dim,
+                    size_sampling_mode=config.get('size_sampling_mode', 'uniform'),
+                    train_keep_k_write_key='train_keep_k',
+                )
+                model.decoder.module_dict['dec_nested_dropout'] = dec_dropout_new
+
     if not gradient_checkpointing:
         print("\nDisabling gradient checkpointing...")
 
@@ -1125,29 +1161,50 @@ def main(cfg: DictConfig):
     use_arcface = config.get('use_arcface', False)
     use_identity_collate = config.get('arcface_use_pairs', False)
 
-    train_loader = create_celeb_dataloader(
-        dataset_type=dataset_name,
-        root_dir=config['data_path'],
-        img_size=config.get('img_size', 256),
-        batch_size=config.get('batch_size', 32),
-        split='train',
-        num_workers=config.get('num_workers', 4),
-        transform=train_transforms,
-        return_identity=use_arcface,
-        use_identity_collate=use_identity_collate,
-    )
+    # Create dataloaders based on dataset type
+    if dataset_name.lower() == 'imagenet':
+        train_loader = create_imagenet_dataloader(
+            root_dir=config['data_path'],
+            img_size=config.get('img_size', 256),
+            batch_size=config.get('batch_size', 32),
+            split='train',
+            num_workers=config.get('num_workers', 4),
+            transform=train_transforms,
+        )
 
-    val_loader = create_celeb_dataloader(
-        dataset_type=dataset_name,
-        root_dir=config['data_path'],
-        img_size=config.get('img_size', 256),
-        batch_size=config.get('val_batch_size', config.get('batch_size', 32)),
-        split='val',
-        num_workers=config.get('num_workers', 4),
-        shuffle=False,
-        return_identity=use_arcface,
-        use_identity_collate=use_identity_collate,
-    )
+        val_loader = create_imagenet_dataloader(
+            root_dir=config['data_path'],
+            img_size=config.get('img_size', 256),
+            batch_size=config.get('val_batch_size', config.get('batch_size', 32)),
+            split='val',
+            num_workers=config.get('num_workers', 4),
+            shuffle=False,
+        )
+    else:
+        # CelebA, CelebA-HQ, or synthetic faces
+        train_loader = create_celeb_dataloader(
+            dataset_type=dataset_name,
+            root_dir=config['data_path'],
+            img_size=config.get('img_size', 256),
+            batch_size=config.get('batch_size', 32),
+            split='train',
+            num_workers=config.get('num_workers', 4),
+            transform=train_transforms,
+            return_identity=use_arcface,
+            use_identity_collate=use_identity_collate,
+        )
+
+        val_loader = create_celeb_dataloader(
+            dataset_type=dataset_name,
+            root_dir=config['data_path'],
+            img_size=config.get('img_size', 256),
+            batch_size=config.get('val_batch_size', config.get('batch_size', 32)),
+            split='val',
+            num_workers=config.get('num_workers', 4),
+            shuffle=False,
+            return_identity=use_arcface,
+            use_identity_collate=use_identity_collate,
+        )
 
     print(f"Train batches: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
