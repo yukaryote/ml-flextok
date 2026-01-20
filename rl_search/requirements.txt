@@ -1,0 +1,23 @@
+# RL Search Requirements
+# Install with: pip install -r requirements.txt
+
+# Core RL libraries
+gymnasium>=0.28.0
+stable-baselines3>=2.0.0
+tensorboard>=2.11.0
+
+# Deep learning (likely already installed with FlexTok)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Utilities
+numpy>=1.24.0
+matplotlib>=3.7.0
+pyyaml>=6.0
+Pillow>=9.5.0
+tqdm>=4.65.0
+
+# Optional: for better logging
+wandb>=0.15.0
+
+# Note: dreamsim should be installed separately following FlexTok setup

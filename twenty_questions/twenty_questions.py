@@ -41,7 +41,6 @@ print('BF16 enabled:', enable_bf16)
 
 
 def load_flextok_model(
-        model_name: str, 
         bf16: bool = True, 
         ckpt_path: Optional[str] = None,
         fsq_level: Optional[list[int]] = None
@@ -136,7 +135,7 @@ def get_possible_combos(flextok_model: FlexTok):
     return torch.stack([torch.tensor(comb) for comb in all_combinations], dim=0)
 
 
-def zhat_to_tokens(flextok_model: FlexTok, zhats: torch.Tensor):
+def zhat_to_tokens(flextok_model: FlexTok, zhats: torch.Tensor) -> torch.Tensor:
     """
     Given list of zhats, generate tokens from zhats.
     Args:
@@ -229,6 +228,269 @@ def convert_images_to_pil(images: torch.Tensor) -> list[Image.Image]:
         images_pil = TF.to_pil_image(img.cpu())
         images_pil_list.append(images_pil)
     return images_pil_list
+
+
+def greedy_search(
+    flextok_model: FlexTok,
+    secret_image: Image.Image,
+    tokens_list: list[torch.Tensor],
+    num_samples_per_quantization: int,
+    enable_bf16: bool,
+    eval_model,
+    preprocess_fn,
+    num_questions: int,
+) -> tuple[list[tuple], list[dict]]:
+    """
+    Greedy search algorithm for auto_twenty_q.
+    Selects the best token at each iteration based on the evaluation model.
+
+    Args:
+        flextok_model: The FlexTok model.
+        secret_image: The secret image to compare against (PIL Image).
+        tokens_list: List of possible tokens to sample from.
+        num_samples_per_quantization: Number of samples to generate per token.
+        enable_bf16: Whether to use bf16 context.
+        eval_model: Model to evaluate similarity (e.g., DreamSim or VLM scorer).
+        preprocess_fn: Optional preprocessing function for images before evaluation.
+        num_questions: Maximum number of iterations.
+
+    Returns:
+        chosen_history: List of tuples (chosen_token, chosen_image, score).
+        rejected_history: List of dicts mapping rejected tokens to (image, score).
+    """
+    from dreamsim import dreamsim
+
+    chosen_history = []
+    rejected_history = []
+
+    for iters in range(num_questions):
+        chosen_tokens = [item[0] for item in chosen_history]
+
+        # Sample images from tokens
+        images_dict = sample_images_per_quantization(
+            flextok_model,
+            tokens_list,
+            num_samples_per_quantization=num_samples_per_quantization,
+            condition_tokens=chosen_tokens,
+            bf16=enable_bf16
+        )
+
+        # Evaluate with eval_model
+        pairwise_scores = {}
+        for token, images in images_dict.items():
+            # Check if eval_model has a dreamsim-like interface or VLM interface
+            if hasattr(eval_model, '__call__'):
+                # Assume it's a callable that takes two PIL images
+                secret_pil = secret_image if isinstance(secret_image, Image.Image) else convert_images_to_pil(secret_image)[0]
+                scores = []
+                for img in images:
+                    img_pil = convert_images_to_pil(img.unsqueeze(0))[0]
+                    score = eval_model(secret_pil, img_pil)
+                    scores.append(score if isinstance(score, float) else score.item())
+                pairwise_scores[token] = sum(scores) / len(scores)
+            else:
+                # DreamSim-specific preprocessing
+                preprocessed_images = torch.stack([
+                    preprocess_fn(convert_images_to_pil(img.unsqueeze(0))[0])
+                    for img in images
+                ]).to(images.device)
+                secret_preprocessed = preprocess_fn(secret_image).to(images.device)
+                scores = []
+                with torch.no_grad():
+                    for img in preprocessed_images:
+                        scores.append(eval_model(secret_preprocessed, img))
+                pairwise_scores[token] = torch.tensor(scores).mean().item()
+
+        # Select best token (greedy)
+        user_choice_token = min(pairwise_scores, key=pairwise_scores.get)
+        user_choice_image = images_dict[user_choice_token]
+        user_choice_image_pil = convert_images_to_pil(user_choice_image)[0]
+
+        chosen_history.append((
+            torch.tensor([[user_choice_token]], device=tokens_list[0].device),
+            user_choice_image_pil,
+            pairwise_scores[user_choice_token]
+        ))
+
+        # Track rejected options
+        rejected_dict = {}
+        for token, images in images_dict.items():
+            if token != user_choice_token:
+                rejected_image_pil = convert_images_to_pil(images)[0]
+                rejected_dict[token] = (rejected_image_pil, pairwise_scores[token])
+        rejected_history.append(rejected_dict)
+
+        print(f"Iteration {iters + 1}: Chosen token {user_choice_token} with score {pairwise_scores[user_choice_token]:.4f}")
+
+    return chosen_history, rejected_history
+
+
+def beam_search(
+    flextok_model: FlexTok,
+    secret_image: Image.Image,
+    tokens_list: list[torch.Tensor],
+    num_samples_per_quantization: int,
+    enable_bf16: bool,
+    eval_model,
+    num_questions: int,
+    beam_width: int = 3,    
+    preprocess_fn=None,
+) -> tuple[list[tuple], list[dict]]:
+    """
+    Beam search algorithm for auto_twenty_q.
+    Maintains top-k candidates (beams) at each iteration.
+
+    Args:
+        flextok_model: The FlexTok model.
+        secret_image: The secret image to compare against (PIL Image).
+        tokens_list: List of possible tokens to sample from.
+        num_samples_per_quantization: Number of samples to generate per token.
+        enable_bf16: Whether to use bf16 context.
+        eval_model: Model to evaluate similarity (e.g., DreamSim or VLM scorer).
+        num_questions: Maximum number of iterations.
+        beam_width: Number of beams to maintain at each step.
+        preprocess_fn: Optional preprocessing function for images before evaluation.
+
+    Returns:
+        chosen_history: List of tuples (chosen_token, chosen_image, score) for best beam.
+        rejected_history: List of dicts mapping rejected tokens to (image, score) for best beam.
+    """
+    from dreamsim import dreamsim
+
+    # Each beam is a dict with:
+    # - 'history': list of (token, image_pil, score) tuples
+    # - 'cumulative_score': sum of scores so far
+    beams = [{'history': [], 'cumulative_score': 0.0}]
+
+    for iters in range(num_questions):
+        all_candidates = []
+
+        # Expand each beam
+        for beam in beams:
+            chosen_tokens = [item[0] for item in beam['history']]
+
+            # Sample images from tokens
+            images_dict = sample_images_per_quantization(
+                flextok_model,
+                tokens_list,
+                num_samples_per_quantization=num_samples_per_quantization,
+                condition_tokens=chosen_tokens,
+                bf16=enable_bf16
+            )
+
+            # Evaluate with eval_model
+            pairwise_scores = {}
+            for token, images in images_dict.items():
+                # Check if eval_model has a dreamsim-like interface or VLM interface
+                # if hasattr(eval_model, '__call__'):
+                #     # Assume it's a callable that takes two PIL images
+                #     secret_pil = secret_image if isinstance(secret_image, Image.Image) else convert_images_to_pil(secret_image)[0]
+                #     scores = []
+                #     for img in images:
+                #         img_pil = convert_images_to_pil(img.unsqueeze(0))[0]
+                #         score = eval_model(secret_pil, img_pil)
+                #         scores.append(score if isinstance(score, float) else score.item())
+                #     pairwise_scores[token] = sum(scores) / len(scores)
+                # else:
+                # DreamSim-specific preprocessing
+                preprocessed_images = torch.stack([
+                    preprocess_fn(convert_images_to_pil(img.unsqueeze(0))[0])
+                    for img in images
+                ]).to(device)
+                secret_preprocessed = preprocess_fn(secret_image).to(device)
+                scores = []
+                with torch.no_grad():
+                    for img in preprocessed_images:
+                        scores.append(eval_model(secret_preprocessed, img))
+                pairwise_scores[token] = torch.tensor(scores).mean().item()
+
+            # Create candidate for each possible next token
+            for token, score in pairwise_scores.items():
+                image_pil = convert_images_to_pil(images_dict[token])[0]
+                new_history = beam['history'] + [(
+                    torch.tensor([[token]], device=tokens_list[0].device),
+                    image_pil,
+                    score
+                )]
+                new_cumulative_score = beam['cumulative_score'] + score
+
+                all_candidates.append({
+                    'history': new_history,
+                    'cumulative_score': new_cumulative_score
+                })
+
+        # Select top-k candidates (lower cumulative score is better)
+        beams = sorted(all_candidates, key=lambda x: x['cumulative_score'])[:beam_width]
+
+        best_score = beams[0]['cumulative_score'] / (iters + 1)
+        print(f"Iteration {iters + 1}: Top beam avg score {best_score:.4f}, maintaining {len(beams)} beams")
+
+    # Return the best beam
+    best_beam = beams[0]
+    chosen_history = best_beam['history']
+
+    # Generate rejected_history (empty for beam search, as we don't track per-step rejections)
+    rejected_history = [{} for _ in range(num_questions)]
+
+    return chosen_history, rejected_history
+
+
+def auto_twenty_q(
+    flextok_model: FlexTok,
+    secret_image: Image.Image,
+    tokens_list: list[torch.Tensor],
+    num_samples_per_quantization: int = 1,
+    enable_bf16: bool = True,
+    eval_model = None,
+    num_questions: int = 256,
+    search_algorithm: str = "greedy",
+    beam_width: int = 3,
+    preprocess_fn=None,
+) -> tuple[list[tuple], list[dict]]:
+    """
+    Main function to run automated 20 Questions with a choice of search algorithm.
+
+    Args:
+        flextok_model: The FlexTok model.
+        secret_image: The secret image to compare against (PIL Image).
+        tokens_list: List of possible tokens to sample from.
+        num_samples_per_quantization: Number of samples to generate per token.
+        enable_bf16: Whether to use bf16 context.
+        eval_model: Model to evaluate similarity (e.g., DreamSim or VLM scorer).
+        num_questions: Maximum number of iterations.
+        search_algorithm: Search algorithm to use. Options: "greedy", "beam".
+        beam_width: Number of beams to maintain (only used if search_algorithm="beam").
+        preprocess_fn: Optional preprocessing function for images before evaluation.
+
+    Returns:
+        chosen_history: List of tuples (chosen_token, chosen_image, score).
+        rejected_history: List of dicts mapping rejected tokens to (image, score).
+    """
+    if search_algorithm == "greedy":
+        return greedy_search(
+            flextok_model=flextok_model,
+            secret_image=secret_image,
+            tokens_list=tokens_list,
+            num_samples_per_quantization=num_samples_per_quantization,
+            enable_bf16=enable_bf16,
+            eval_model=eval_model,
+            num_questions=num_questions,
+            preprocess_fn=preprocess_fn,
+        )
+    elif search_algorithm == "beam":
+        return beam_search(
+            flextok_model=flextok_model,
+            secret_image=secret_image,
+            tokens_list=tokens_list,
+            num_samples_per_quantization=num_samples_per_quantization,
+            enable_bf16=enable_bf16,
+            eval_model=eval_model,
+            num_questions=num_questions,
+            beam_width=beam_width,
+            preprocess_fn=preprocess_fn,
+        )
+    else:
+        raise ValueError(f"Unknown search algorithm: {search_algorithm}. Choose 'greedy' or 'beam'.")
 
 
 def main(
