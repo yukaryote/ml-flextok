@@ -4,17 +4,33 @@ RL agent implementations for FlexTok token search.
 Provides wrappers around Stable-Baselines3 agents with custom
 features and network architectures.
 """
-from typing import Optional, Dict, Any, Union, Type
+from typing import Optional, Dict, Any, Union, Type, List
 import torch
 import torch.nn as nn
 from stable_baselines3 import SAC, DQN, PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 import numpy as np
 from pathlib import Path
+
+# Import advanced architectures
+try:
+    from rl_search.architectures import AdvancedFeatureExtractor
+    ADVANCED_ARCHITECTURES_AVAILABLE = True
+except ImportError:
+    ADVANCED_ARCHITECTURES_AVAILABLE = False
+
+# Import WandB callbacks
+try:
+    import wandb
+    from rl_search.wandb_callbacks import WandbCallback, WandbEvalCallback, init_wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
 
 
 class CustomFeatureExtractor(nn.Module):
@@ -97,9 +113,11 @@ class CustomFeatureExtractor(nn.Module):
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Extract features from observations."""
         # Encode each component
-        position_features = self.position_encoder(observations['position'])
-        token_features = self.token_encoder(observations['token_history'])
-        reward_features = self.reward_encoder(observations['reward_history'])
+        # Note: Stable-Baselines3 already handles tensor conversion,
+        # so observations should already be tensors on the correct device
+        position_features = self.position_encoder(observations['position'].float())
+        token_features = self.token_encoder(observations['token_history'].float())
+        reward_features = self.reward_encoder(observations['reward_history'].float())
 
         # Combine features
         features = [position_features, token_features, reward_features]
@@ -176,11 +194,15 @@ class SACAgent:
         if use_custom_feature_extractor:
             from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+            # Store these in closure for the class
+            _features_dim = features_dim
+            _use_image = use_image
+
             class CustomExtractor(BaseFeaturesExtractor):
-                def __init__(self, observation_space: gym.spaces.Dict):
-                    super().__init__(observation_space, features_dim=features_dim)
+                def __init__(self, observation_space: gym.spaces.Dict, **kwargs):
+                    super().__init__(observation_space, features_dim=_features_dim)
                     self.extractor = CustomFeatureExtractor(
-                        observation_space, features_dim, use_image
+                        observation_space, _features_dim, _use_image
                     )
 
                 def forward(self, observations):
@@ -296,11 +318,15 @@ class DQNAgent:
         if use_custom_feature_extractor:
             from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+            # Store these in closure for the class
+            _features_dim = features_dim
+            _use_image = use_image
+
             class CustomExtractor(BaseFeaturesExtractor):
-                def __init__(self, observation_space: gym.spaces.Dict):
-                    super().__init__(observation_space, features_dim=features_dim)
+                def __init__(self, observation_space: gym.spaces.Dict, **kwargs):
+                    super().__init__(observation_space, features_dim=_features_dim)
                     self.extractor = CustomFeatureExtractor(
-                        observation_space, features_dim, use_image
+                        observation_space, _features_dim, _use_image
                     )
 
                 def forward(self, observations):
@@ -416,11 +442,15 @@ class PPOAgent:
         if use_custom_feature_extractor:
             from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+            # Store these in closure for the class
+            _features_dim = features_dim
+            _use_image = use_image
+
             class CustomExtractor(BaseFeaturesExtractor):
-                def __init__(self, observation_space: gym.spaces.Dict):
-                    super().__init__(observation_space, features_dim=features_dim)
+                def __init__(self, observation_space: gym.spaces.Dict, **kwargs):
+                    super().__init__(observation_space, features_dim=_features_dim)
                     self.extractor = CustomFeatureExtractor(
-                        observation_space, features_dim, use_image
+                        observation_space, _features_dim, _use_image
                     )
 
                 def forward(self, observations):
@@ -501,5 +531,161 @@ def create_agent(
         return DQNAgent(env, **config)
     elif agent_type.lower() == 'ppo':
         return PPOAgent(env, **config)
+    else:
+        raise ValueError(f"Unknown agent type: {agent_type}")
+
+
+def create_agent_with_advanced_architecture(
+    agent_type: str,
+    env: gym.Env,
+    architecture: str = 'transformer',
+    features_dim: int = 512,
+    use_image: bool = True,
+    config: Optional[Dict[str, Any]] = None,
+) -> Union[SACAgent, DQNAgent, PPOAgent]:
+    """
+    Factory function to create RL agent with advanced architectures.
+
+    Args:
+        agent_type: Type of agent ('sac', 'dqn', or 'ppo')
+        env: Gymnasium environment
+        architecture: Architecture type:
+            - 'transformer': Transformer for history + CNN + cross-attention (BEST)
+            - 'gru': GRU for history + CNN (good balance)
+            - 'efficient': Simple MLP + efficient CNN (fastest)
+        features_dim: Output feature dimension
+        use_image: Whether to use image observations
+        config: Additional agent configuration
+
+    Returns:
+        RL agent instance with advanced feature extractor
+
+    Example:
+        >>> agent = create_agent_with_advanced_architecture(
+        ...     agent_type='dqn',
+        ...     env=env,
+        ...     architecture='transformer',
+        ...     use_image=True,
+        ...     features_dim=512,
+        ... )
+    """
+    if not ADVANCED_ARCHITECTURES_AVAILABLE:
+        raise ImportError(
+            "Advanced architectures not available. "
+            "Make sure rl_search.architectures is properly installed."
+        )
+
+    config = config or {}
+
+    # Override feature extractor settings
+    config['use_custom_feature_extractor'] = True
+    config['features_dim'] = features_dim
+    config['use_image'] = use_image
+
+    # Create custom extractor wrapper
+    from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+    class AdvancedExtractor(BaseFeaturesExtractor):
+        def __init__(self, observation_space: gym.spaces.Dict):
+            super().__init__(observation_space, features_dim=features_dim)
+            self.extractor = AdvancedFeatureExtractor(
+                observation_space=observation_space,
+                features_dim=features_dim,
+                use_image=use_image,
+                architecture=architecture,
+            )
+
+        def forward(self, observations):
+            return self.extractor(observations)
+
+    # Inject custom extractor into config
+    if 'policy_kwargs' not in config:
+        config['policy_kwargs'] = {}
+    config['policy_kwargs']['features_extractor_class'] = AdvancedExtractor
+    config['policy_kwargs']['features_extractor_kwargs'] = {}
+
+    # Remove use_custom_feature_extractor flag as we're using policy_kwargs
+    config.pop('use_custom_feature_extractor', None)
+
+    # Create agent with advanced architecture
+    if agent_type.lower() == 'sac':
+        # Create SAC with custom policy_kwargs
+        agent = SACAgent.__new__(SACAgent)
+        agent.env = env
+        agent.use_custom_feature_extractor = True
+
+        # Extract SAC-specific params
+        sac_params = {
+            'learning_rate': config.get('learning_rate', 3e-4),
+            'buffer_size': config.get('buffer_size', 100000),
+            'batch_size': config.get('batch_size', 256),
+            'tau': config.get('tau', 0.005),
+            'gamma': config.get('gamma', 0.99),
+            'train_freq': config.get('train_freq', 1),
+            'gradient_steps': config.get('gradient_steps', 1),
+            'ent_coef': config.get('ent_coef', 'auto'),
+            'target_entropy': config.get('target_entropy', 'auto'),
+            'verbose': config.get('verbose', 1),
+            'device': config.get('device', 'auto'),
+            'tensorboard_log': config.get('tensorboard_log', None),
+            'policy_kwargs': config['policy_kwargs'],
+        }
+
+        agent.model = SAC('MultiInputPolicy', env, **sac_params)
+        return agent
+
+    elif agent_type.lower() == 'dqn':
+        # Create DQN with custom policy_kwargs
+        agent = DQNAgent.__new__(DQNAgent)
+        agent.env = env
+        agent.use_custom_feature_extractor = True
+
+        dqn_params = {
+            'learning_rate': config.get('learning_rate', 1e-4),
+            'buffer_size': config.get('buffer_size', 100000),
+            'batch_size': config.get('batch_size', 32),
+            'tau': config.get('tau', 1.0),
+            'gamma': config.get('gamma', 0.99),
+            'train_freq': config.get('train_freq', 4),
+            'gradient_steps': config.get('gradient_steps', 1),
+            'target_update_interval': config.get('target_update_interval', 10000),
+            'exploration_fraction': config.get('exploration_fraction', 0.1),
+            'exploration_initial_eps': config.get('exploration_initial_eps', 1.0),
+            'exploration_final_eps': config.get('exploration_final_eps', 0.05),
+            'verbose': config.get('verbose', 1),
+            'device': config.get('device', 'auto'),
+            'tensorboard_log': config.get('tensorboard_log', None),
+            'policy_kwargs': config['policy_kwargs'],
+        }
+
+        agent.model = DQN('MultiInputPolicy', env, **dqn_params)
+        return agent
+
+    elif agent_type.lower() == 'ppo':
+        # Create PPO with custom policy_kwargs
+        agent = PPOAgent.__new__(PPOAgent)
+        agent.env = env
+        agent.use_custom_feature_extractor = True
+
+        ppo_params = {
+            'learning_rate': config.get('learning_rate', 3e-4),
+            'n_steps': config.get('n_steps', 2048),
+            'batch_size': config.get('batch_size', 64),
+            'n_epochs': config.get('n_epochs', 10),
+            'gamma': config.get('gamma', 0.99),
+            'gae_lambda': config.get('gae_lambda', 0.95),
+            'clip_range': config.get('clip_range', 0.2),
+            'ent_coef': config.get('ent_coef', 0.0),
+            'vf_coef': config.get('vf_coef', 0.5),
+            'max_grad_norm': config.get('max_grad_norm', 0.5),
+            'verbose': config.get('verbose', 1),
+            'device': config.get('device', 'auto'),
+            'tensorboard_log': config.get('tensorboard_log', None),
+            'policy_kwargs': config['policy_kwargs'],
+        }
+
+        agent.model = PPO('MultiInputPolicy', env, **ppo_params)
+        return agent
+
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")

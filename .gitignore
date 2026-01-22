@@ -15,3 +15,4 @@ wandb/
 data/*
 checkpoints/*
 outputs/*
+rl_checkpoints/*

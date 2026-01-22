@@ -109,7 +109,7 @@ class FlexTokSearchEnv(gym.Env):
         # 1. Current token position (normalized)
         # 2. Past N token choices (one-hot or normalized)
         # 3. Past N rewards
-        # 4. (Optional) Current decoded image
+        # 4. (Optional) Past decoded images
 
         obs_dict = {}
 
@@ -145,7 +145,7 @@ class FlexTokSearchEnv(gym.Env):
             # Assume 256x256 RGB image
             obs_dict['image'] = spaces.Box(
                 low=0, high=255,
-                shape=(256, 256, 3),
+                shape=(history_length, 256, 256, 3),
                 dtype=np.uint8
             )
 
@@ -158,6 +158,10 @@ class FlexTokSearchEnv(gym.Env):
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """Reset the environment to initial state."""
         super().reset(seed=seed)
+
+        # Update target image if provided in options
+        if options is not None and 'target_image' in options:
+            self.target_image = options['target_image']
 
         # Reset state
         self.current_token_idx = 0
@@ -283,7 +287,7 @@ class FlexTokSearchEnv(gym.Env):
 
         # Get dreamsim reward of current token + small penalty for undo
         # Compute similarity score
-        score = self.similarity_fn(self.target_image, current_image)
+        score = self.similarity_fn(self.target_image, self.current_image)
 
         # Update best score
         if score < self.best_score:
@@ -315,21 +319,24 @@ class FlexTokSearchEnv(gym.Env):
     def _decode_tokens(self, tokens: torch.Tensor) -> Image.Image:
         """Decode token sequence to PIL Image."""
         # tokens shape: (num_tokens,)
-        # Need to reshape to (1, H, W) for FlexTok
-        # Assuming square spatial layout
-        num_tokens = tokens.shape[0]
-        H = W = int(np.sqrt(num_tokens))
-
-        # Reshape tokens
-        tokens_2d = tokens[:H*W].reshape(1, H, W)
+        # detokenize expects a list of 2D tensors with shape [1, seq_len]
+        # where seq_len is the full sequence length
 
         # Decode with FlexTok
         with torch.no_grad():
             with get_bf16_context(self.enable_bf16):
-                decoded = self.flextok_model.decode_tokens(tokens_2d)
+                # Pass as a list containing a 2D token sequence [1, seq_len]
+                decoded = self.flextok_model.detokenize(
+                    [tokens.unsqueeze(0)],  # List of tensors with shape [1, seq_len]
+                    timesteps=25,
+                    guidance_scale=7.5,
+                    perform_norm_guidance=True,
+                    generator=None,
+                    verbose=False,
+                )
 
         # Convert to PIL Image
-        # Assume decoded is (1, C, H, W) in [-1, 1]
+        # decoded is (1, C, H, W) in [-1, 1]
         decoded = decoded[0]  # (C, H, W)
         decoded = (decoded + 1) / 2  # Normalize to [0, 1]
         decoded = decoded.clamp(0, 1)
@@ -354,7 +361,7 @@ class FlexTokSearchEnv(gym.Env):
 
         # Current position (normalized)
         obs['position'] = np.array([self.current_token_idx / self.num_token_positions],
-                                   dtype=np.float32)
+                                   dtype=np.float32).copy()
 
         # Token history
         if len(self.fsq_levels) == 1:
@@ -369,18 +376,18 @@ class FlexTokSearchEnv(gym.Env):
                 # TODO: handle multi-dimensional tokens
                 pass
 
-        obs['token_history'] = token_history
+        obs['token_history'] = token_history.copy()
 
         # Reward history
         reward_history = np.zeros(self.history_length, dtype=np.float32)
         for i, (_, reward) in enumerate(self.history[-self.history_length:]):
-            reward_history[i] = reward
-        obs['reward_history'] = reward_history
+            reward_history[i] = float(reward)
+        obs['reward_history'] = reward_history.copy()
 
         # Optional: current decoded image
         if self.image_obs and self.current_image is not None:
             img_array = np.array(self.current_image)
-            obs['image'] = img_array
+            obs['image'] = img_array.copy()
         elif self.image_obs:
             # Placeholder blank image
             obs['image'] = np.zeros((256, 256, 3), dtype=np.uint8)

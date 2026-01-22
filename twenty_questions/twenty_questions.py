@@ -16,6 +16,7 @@ import tqdm
 from PIL import Image
 import torch
 import torchvision.transforms.functional as TF
+from einops import rearrange, repeat
 
 from diffusers.models import AutoencoderKL
 
@@ -161,7 +162,7 @@ def sample_images_per_quantization(
     Given all possible tokens, sample images from each token.
     Args:
         flextok_model: The FlexTok model.
-        possible_tokens_list: N-length list of tokens, each of shape (1, 1) (N=2 in binary case)
+        possible_tokens_list: N-length list of all possible tokens, each of shape (1, 1) (N=2 in binary case)
         num_samples_per_quantization: Number of samples to generate per quantization combination.
         condition_tokens: Optional list of past tokens to be passed as conditioning.
         bf16: Whether to use bf16 context.
@@ -173,10 +174,14 @@ def sample_images_per_quantization(
     # Prepare all condition token sequences
     all_final_tokens = []
     token_keys = []
+    # convert possible_tokens_list and condition_tokens to tensors
+    condition_tokens_th = torch.stack(condition_tokens, dim=0).squeeze(-1) if len(condition_tokens) > 0 else torch.empty((0, 1), device=possible_tokens_list[0].device)  # (N_conditions, 1)
+    possible_tokens_list_th = torch.stack(possible_tokens_list, dim=0).squeeze(dim=-1)  # (N_options, 1)
+    # all_final_tokens should be shape (N_options, N_conditions + 1, 1)
+    all_final_tokens = torch.cat([condition_tokens_th.unsqueeze(0).expand(possible_tokens_list_th.shape[0], -1, -1), possible_tokens_list_th.unsqueeze(1)], dim=1)  # (N_options, N_conditions + 1, 1)
+
+    # Build token_keys list
     for i in range(len(possible_tokens_list)):
-        batch_tokens_list = possible_tokens_list[i:i+1]
-        final_condition_tokens = condition_tokens + batch_tokens_list
-        all_final_tokens.append(final_condition_tokens)
         token_keys.append(possible_tokens_list[i].item())
 
     print(f"Generating {len(all_final_tokens)} images in parallel (batch mode)...")
@@ -184,30 +189,36 @@ def sample_images_per_quantization(
     with get_bf16_context(bf16):
         with torch.no_grad():
             # Flatten all sequences into a single list for batched detokenization
-            # Each sequence needs to be converted to the proper format
-            batched_token_sequences = []
-            for final_tokens in all_final_tokens:
-                # Concatenate condition tokens with each new token
-                token_seq = torch.cat(final_tokens, dim=-1)  # (1, seq_len)
-                batched_token_sequences.append(token_seq)
+            batched_token_sequences = all_final_tokens.squeeze(-1).split(1, dim=0)  # List of (N_conditions + 1,) tensors
 
-            # Generate all images in one batched call
-            all_reconstructions_flat = []
-            for _ in range(num_samples_per_quantization):
-                reconst_batch = flextok_model.detokenize(
-                    batched_token_sequences,
-                    timesteps=25,
-                    guidance_scale=7.5,
-                    perform_norm_guidance=True,
-                    generator=None,
-                    verbose=False,
-                )
-                all_reconstructions_flat.append(reconst_batch.cpu())
+            # OPTIMIZATION: Replicate each sequence num_samples_per_quantization times
+            # This allows us to generate all samples in a single detokenize() call
+            # instead of calling it num_samples_per_quantization times sequentially
+            replicated_sequences = []
+            for seq in batched_token_sequences:
+                for _ in range(num_samples_per_quantization):
+                    replicated_sequences.append(seq)
 
-            # Stack samples and reshape
-            # all_reconstructions_flat is list of (N_options, C, H, W) tensors
-            all_reconstructions = torch.stack(all_reconstructions_flat, dim=0)  # (num_samples, N_options, C, H, W)
-            all_reconstructions = all_reconstructions.permute(1, 0, 2, 3, 4)  # (N_options, num_samples, C, H, W)
+            print(f"Detokenizing {len(replicated_sequences)} sequences in one batch ({num_samples_per_quantization} samples × {len(batched_token_sequences)} options)")
+
+            # Generate ALL images in ONE batched call - MUCH FASTER!
+            all_reconstructions_flat = flextok_model.detokenize(
+                replicated_sequences,
+                timesteps=25,
+                guidance_scale=7.5,
+                perform_norm_guidance=True,
+                generator=None,
+                verbose=False,
+            )  # (N_options * num_samples, C, H, W)
+
+            # Reshape to group by token option
+            # all_reconstructions_flat: (N_options * num_samples, C, H, W)
+            # Need to reshape to: (N_options, num_samples, C, H, W)
+            N_options = len(batched_token_sequences)
+            C, H, W = all_reconstructions_flat.shape[1:]
+            all_reconstructions = all_reconstructions_flat.view(
+                N_options, num_samples_per_quantization, C, H, W
+            ).cpu()
 
     # Map results back to dictionary
     for idx, token_key in enumerate(token_keys):
@@ -264,7 +275,7 @@ def greedy_search(
     rejected_history = []
 
     for iters in range(num_questions):
-        chosen_tokens = [item[0] for item in chosen_history]
+        chosen_tokens = [item[0] for item in chosen_history]  # (N, 1)
 
         # Sample images from tokens
         images_dict = sample_images_per_quantization(
@@ -333,7 +344,7 @@ def beam_search(
     enable_bf16: bool,
     eval_model,
     num_questions: int,
-    beam_width: int = 3,    
+    beam_width: int = 3,
     preprocess_fn=None,
 ) -> tuple[list[tuple], list[dict]]:
     """
@@ -435,6 +446,137 @@ def beam_search(
     return chosen_history, rejected_history
 
 
+def beam_search_parallel(
+    flextok_model: FlexTok,
+    secret_image: Image.Image,
+    tokens_list: list[torch.Tensor],
+    num_samples_per_quantization: int,
+    enable_bf16: bool,
+    eval_model,
+    num_questions: int,
+    beam_width: int = 3,
+    preprocess_fn=None,
+) -> tuple[list[tuple], list[dict]]:
+    """
+    FULLY PARALLELIZED beam search algorithm for auto_twenty_q.
+    Processes all beams simultaneously for maximum speed.
+
+    Args:
+        flextok_model: The FlexTok model.
+        secret_image: The secret image to compare against (PIL Image).
+        tokens_list: List of possible tokens to sample from.
+        num_samples_per_quantization: Number of samples to generate per token.
+        enable_bf16: Whether to use bf16 context.
+        eval_model: Model to evaluate similarity (e.g., DreamSim or VLM scorer).
+        num_questions: Maximum number of iterations.
+        beam_width: Number of beams to maintain at each step.
+        preprocess_fn: Optional preprocessing function for images before evaluation.
+
+    Returns:
+        chosen_history: List of tuples (chosen_token, chosen_image, score) for best beam.
+        rejected_history: List of dicts mapping rejected tokens to (image, score) for best beam.
+    """
+    # Each beam is a dict with:
+    # - 'history': list of (token, image_pil, score) tuples
+    # - 'cumulative_score': sum of scores so far
+    beams = [{'history': [], 'cumulative_score': 0.0}]
+
+    # Preprocess secret image once
+    secret_preprocessed = preprocess_fn(secret_image).to(device)
+
+    for iters in range(num_questions):
+        # PARALLEL: Collect all beam expansions
+        beam_expansions = []  # List of (beam_idx, images_dict)
+
+        # Sample images for ALL beams in parallel
+        for beam_idx, beam in enumerate(beams):
+            chosen_tokens = [item[0] for item in beam['history']]
+
+            # Sample images from tokens
+            images_dict = sample_images_per_quantization(
+                flextok_model,
+                tokens_list,
+                num_samples_per_quantization=num_samples_per_quantization,
+                condition_tokens=chosen_tokens,
+                bf16=enable_bf16
+            )
+            beam_expansions.append((beam_idx, images_dict))
+
+        # PARALLEL: Batch evaluate ALL images from ALL beams at once
+        all_candidates = []
+
+        # Collect all images across all beams
+        mega_batch_images = []
+        mega_batch_metadata = []  # (beam_idx, token)
+
+        for beam_idx, images_dict in beam_expansions:
+            for token, images in images_dict.items():
+                # Preprocess images for this token
+                preprocessed_images = torch.stack([
+                    preprocess_fn(convert_images_to_pil(img.unsqueeze(0))[0])
+                    for img in images
+                ]).to(device)
+
+                # Add to mega batch
+                for img_idx in range(preprocessed_images.shape[0]):
+                    mega_batch_images.append(preprocessed_images[img_idx])
+                    mega_batch_metadata.append((beam_idx, token, img_idx, images))
+
+        # MEGA PARALLEL: Evaluate all images at once
+        if mega_batch_images:
+            mega_batch_tensor = torch.stack(mega_batch_images)  # (N, C, H, W)
+            secret_batch = secret_preprocessed.expand(mega_batch_tensor.shape[0], -1, -1, -1)
+
+            with torch.no_grad():
+                mega_scores = eval_model(secret_batch, mega_batch_tensor)  # (N,)
+
+            # Group scores by (beam_idx, token)
+            beam_token_scores = {}
+            for idx, (beam_idx, token, img_idx, images) in enumerate(mega_batch_metadata):
+                key = (beam_idx, token)
+                if key not in beam_token_scores:
+                    beam_token_scores[key] = []
+                score = mega_scores[idx].item() if isinstance(mega_scores, torch.Tensor) else mega_scores
+                beam_token_scores[key].append(score)
+
+            # Average scores and create candidates
+            for (beam_idx, token), scores in beam_token_scores.items():
+                avg_score = sum(scores) / len(scores)
+
+                # Get original images
+                _, images_dict = beam_expansions[beam_idx]
+                image_pil = convert_images_to_pil(images_dict[token])[0]
+
+                # Create new candidate
+                beam = beams[beam_idx]
+                new_history = beam['history'] + [(
+                    torch.tensor([[token]], device=tokens_list[0].device),
+                    image_pil,
+                    avg_score
+                )]
+                new_cumulative_score = beam['cumulative_score'] + avg_score
+
+                all_candidates.append({
+                    'history': new_history,
+                    'cumulative_score': new_cumulative_score
+                })
+
+        # Select top-k candidates (lower cumulative score is better)
+        beams = sorted(all_candidates, key=lambda x: x['cumulative_score'])[:beam_width]
+
+        best_score = beams[0]['cumulative_score'] / (iters + 1)
+        print(f"Iteration {iters + 1}: Top beam avg score {best_score:.4f}, maintaining {len(beams)} beams")
+
+    # Return the best beam
+    best_beam = beams[0]
+    chosen_history = best_beam['history']
+
+    # Generate rejected_history
+    rejected_history = [{} for _ in range(num_questions)]
+
+    return chosen_history, rejected_history
+
+
 def auto_twenty_q(
     flextok_model: FlexTok,
     secret_image: Image.Image,
@@ -446,6 +588,7 @@ def auto_twenty_q(
     search_algorithm: str = "greedy",
     beam_width: int = 3,
     preprocess_fn=None,
+    parallel: bool = True,
 ) -> tuple[list[tuple], list[dict]]:
     """
     Main function to run automated 20 Questions with a choice of search algorithm.
@@ -458,9 +601,10 @@ def auto_twenty_q(
         enable_bf16: Whether to use bf16 context.
         eval_model: Model to evaluate similarity (e.g., DreamSim or VLM scorer).
         num_questions: Maximum number of iterations.
-        search_algorithm: Search algorithm to use. Options: "greedy", "beam".
+        search_algorithm: Search algorithm to use. Options: "greedy", "beam", "beam_parallel".
         beam_width: Number of beams to maintain (only used if search_algorithm="beam").
         preprocess_fn: Optional preprocessing function for images before evaluation.
+        parallel: Whether to use parallelized beam search (default: True for speed).
 
     Returns:
         chosen_history: List of tuples (chosen_token, chosen_image, score).
@@ -478,7 +622,34 @@ def auto_twenty_q(
             preprocess_fn=preprocess_fn,
         )
     elif search_algorithm == "beam":
-        return beam_search(
+        # Use parallelized beam search by default
+        if parallel:
+            return beam_search_parallel(
+                flextok_model=flextok_model,
+                secret_image=secret_image,
+                tokens_list=tokens_list,
+                num_samples_per_quantization=num_samples_per_quantization,
+                enable_bf16=enable_bf16,
+                eval_model=eval_model,
+                num_questions=num_questions,
+                beam_width=beam_width,
+                preprocess_fn=preprocess_fn,
+            )
+        else:
+            return beam_search(
+                flextok_model=flextok_model,
+                secret_image=secret_image,
+                tokens_list=tokens_list,
+                num_samples_per_quantization=num_samples_per_quantization,
+                enable_bf16=enable_bf16,
+                eval_model=eval_model,
+                num_questions=num_questions,
+                beam_width=beam_width,
+                preprocess_fn=preprocess_fn,
+            )
+    elif search_algorithm == "beam_parallel":
+        # Explicitly use parallel version
+        return beam_search_parallel(
             flextok_model=flextok_model,
             secret_image=secret_image,
             tokens_list=tokens_list,
@@ -490,7 +661,7 @@ def auto_twenty_q(
             preprocess_fn=preprocess_fn,
         )
     else:
-        raise ValueError(f"Unknown search algorithm: {search_algorithm}. Choose 'greedy' or 'beam'.")
+        raise ValueError(f"Unknown search algorithm: {search_algorithm}. Choose 'greedy', 'beam', or 'beam_parallel'.")
 
 
 def main(

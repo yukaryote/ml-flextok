@@ -1,0 +1,111 @@
+# Hydra Configuration for FlexTok RL Search Training
+# Usage: python rl_search/train.py [overrides]
+# Example: python rl_search/train.py agent=dqn training.total_timesteps=200000
+
+defaults:
+  - experiment: full_training
+  - agent: dqn
+  - _self_
+
+# Experiment settings
+experiment_name: flextok_rl_search
+seed: 42
+device: auto  # 'auto', 'cuda', or 'cpu'
+enable_bf16: true
+verbose: 1
+
+# FlexTok model configuration
+model:
+  checkpoint_path: /home/iyu/ml-flextok/checkpoints/celeba_d18_arcface_fsq_8/20260108/checkpoint_best.pt
+  fsq_levels: [8]  # FSQ quantization levels
+
+# Dataset configuration
+dataset:
+  name: celeba  # 'celebahq' or custom dataset
+  path: /home/iyu/ml-flextok/data/celeba/
+  img_size: 256
+  split: val  # 'train', 'val', or 'test'
+  target_image_path: null  # Optional: path to specific target image (for single-target training)
+
+# Environment configuration
+environment:
+  max_tokens: 256
+  history_length: 16
+  goal_threshold: 0.1  # DreamSim score threshold for early termination
+  enable_undo: true
+  image_obs: false  # Set to true for image-based observations (requires more memory)
+
+# Reward shaping configuration
+reward:
+  type: simple  # 'simple' or 'custom'
+  mode: improvement  # 'negative', 'inverse', 'exponential', 'improvement'
+  # Additional parameters for custom reward shaping
+  scale: 1.0
+  offset: 0.0
+
+# RL Agent configuration
+agent:
+  type: dqn  # 'dqn', 'sac', or 'ppo'
+
+  # DQN-specific configuration
+  config:
+    learning_rate: 1.0e-4
+    buffer_size: 100000
+    batch_size: 64
+    tau: 1.0
+    gamma: 0.99
+    train_freq: 4
+    gradient_steps: 1
+    target_update_interval: 10000
+    exploration_fraction: 0.2
+    exploration_initial_eps: 1.0
+    exploration_final_eps: 0.05
+    use_custom_feature_extractor: true
+    features_dim: 512
+    use_image: false  # Must match environment.image_obs
+
+# Training configuration
+training:
+  total_timesteps: 100000
+  checkpoint_freq: 10000
+  eval_freq: 10000
+  n_eval_episodes: 5
+  log_interval: 10
+  save_dir: /home/iyu/ml-flextok/rl_checkpoints
+
+  # Multi-target training settings
+  multi_target:
+    enabled: true  # Set to false for single-target training
+    sampler_type: dataset  # 'dataset' or 'fixed'
+    n_fixed_images: 10  # Only used when sampler_type='fixed'
+
+# Weights & Biases configuration
+wandb:
+  enabled: true
+  project: flextok-rl-search
+  run_name: null  # Auto-generated if null
+  entity: null  # Your WandB username/team
+  mode: online  # 'online', 'offline', or 'disabled'
+  tags:
+    - rl
+    - flextok
+    - token-search
+  notes: "RL agent training for FlexTok token search with multi-target support"
+
+  # Logging settings
+  log_freq: 1000  # Log training metrics every N timesteps
+  log_images: true
+  image_log_freq: 10  # Log images every N episodes
+  log_videos: true
+  video_log_freq: 25  # Log videos every N episodes
+  video_fps: 2  # Frame rate for video logging
+
+# Hydra runtime configuration
+hydra:
+  run:
+    dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false  # Don't change working directory

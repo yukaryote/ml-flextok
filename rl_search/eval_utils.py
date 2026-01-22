@@ -12,6 +12,14 @@ from flextok.flextok_wrapper import FlexTok
 from rl_search.environment import FlexTokSearchEnv
 from rl_search.agents import SACAgent, DQNAgent, PPOAgent
 
+# Import WandB if available
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+
 
 def evaluate_agent(
     agent,
@@ -20,6 +28,8 @@ def evaluate_agent(
     deterministic: bool = True,
     render: bool = False,
     verbose: bool = True,
+    log_to_wandb: bool = False,
+    wandb_prefix: str = 'eval',
 ) -> dict:
     """
     Evaluate an RL agent on the environment.
@@ -31,6 +41,8 @@ def evaluate_agent(
         deterministic: Whether to use deterministic actions
         render: Whether to render
         verbose: Whether to print progress
+        log_to_wandb: Whether to log results to WandB
+        wandb_prefix: Prefix for WandB logging keys
 
     Returns:
         Dictionary with evaluation metrics:
@@ -101,6 +113,16 @@ def evaluate_agent(
         'mean_final_score': np.mean(final_scores),
         'trajectories': all_trajectories,
     }
+
+    # Log to WandB if enabled
+    if log_to_wandb and WANDB_AVAILABLE and wandb.run is not None:
+        wandb.log({
+            f'{wandb_prefix}/mean_reward': results['mean_reward'],
+            f'{wandb_prefix}/std_reward': results['std_reward'],
+            f'{wandb_prefix}/mean_best_score': results['mean_best_score'],
+            f'{wandb_prefix}/mean_final_score': results['mean_final_score'],
+            f'{wandb_prefix}/mean_length': np.mean(episode_lengths),
+        })
 
     return results
 

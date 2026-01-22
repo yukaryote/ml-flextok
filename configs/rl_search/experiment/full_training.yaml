@@ -1,0 +1,40 @@
+# Full Training Configuration
+# Long training run with comprehensive logging
+# Usage: python rl_search/train.py experiment=full_training
+
+# @package _global_
+
+experiment_name: full_training
+
+training:
+  total_timesteps: 500000
+  checkpoint_freq: 20000
+  eval_freq: 20000
+  n_eval_episodes: 10
+  log_interval: 10
+
+  multi_target:
+    enabled: true
+    sampler_type: dataset
+
+wandb:
+  enabled: true
+  log_freq: 2000
+  image_log_freq: 20
+  video_log_freq: 50
+  video_fps: 2
+  tags:
+    - rl
+    - flextok
+    - full-training
+    - multi-target
+
+agent:
+  type: dqn
+  config:
+    learning_rate: 1.0e-4
+    buffer_size: 200000
+    batch_size: 64
+    exploration_fraction: 0.15
+    features_dim: 512
+    use_custom_feature_extractor: true

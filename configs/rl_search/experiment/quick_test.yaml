@@ -1,0 +1,30 @@
+# Quick Test Configuration
+# Fast training for testing the setup
+# Usage: python rl_search/train.py experiment=quick_test
+
+# @package _global_
+
+experiment_name: quick_test
+
+training:
+  total_timesteps: 10000
+  checkpoint_freq: 2000
+  eval_freq: 2000
+  n_eval_episodes: 3
+  log_interval: 5
+
+wandb:
+  enabled: true
+  log_freq: 500
+  image_log_freq: 5
+  video_log_freq: 10
+  video_fps: 2
+
+agent:
+  type: dqn
+  config:
+    learning_rate: 1.0e-4
+    buffer_size: 10000
+    batch_size: 32
+    exploration_fraction: 0.3
+    features_dim: 256

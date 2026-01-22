@@ -1,0 +1,37 @@
+# Single Target Training Configuration
+# Train on a single target image (for debugging/overfitting test)
+# Usage: python rl_search/train.py experiment=single_target
+
+# @package _global_
+
+experiment_name: single_target_test
+
+training:
+  total_timesteps: 50000
+  checkpoint_freq: 10000
+  eval_freq: 5000
+  n_eval_episodes: 5
+  log_interval: 10
+
+  multi_target:
+    enabled: false  # Disable multi-target training
+
+wandb:
+  enabled: true
+  log_freq: 1000
+  image_log_freq: 10
+  video_log_freq: 20
+  video_fps: 2
+  tags:
+    - rl
+    - flextok
+    - single-target
+
+agent:
+  type: dqn
+  config:
+    learning_rate: 1.0e-4
+    buffer_size: 50000
+    batch_size: 64
+    exploration_fraction: 0.2
+    features_dim: 256
