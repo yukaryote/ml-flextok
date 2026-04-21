@@ -214,7 +214,7 @@ class FlexTokSearchEnv(gym.Env):
             token_value = self._continuous_to_token(action)
 
         # Set token in sequence
-        self.token_sequence[self.current_token_idx] = token_value
+        self.token_sequence[self.current_token_idx] = torch.tensor(token_value, device=self.device)
 
         # Decode current sequence to image
         current_image = self._decode_tokens(self.token_sequence)
